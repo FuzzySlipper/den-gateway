@@ -57,6 +57,18 @@ app.MapGet("/api/gateway/status", (IOptions<DenGatewayOptions> options) =>
             value.Sentinel.BindingTtlMinutes)));
 });
 
+app.MapGet("/api/sentinel/status", (IOptions<DenGatewayOptions> options) =>
+{
+    var sentinel = options.Value.Sentinel;
+    return Results.Ok(new SentinelStatusResponse(
+        sentinel.SentinelId,
+        "normal",
+        sentinel.PollIntervalSeconds,
+        sentinel.DegradedFailureThreshold,
+        sentinel.DownFailureThreshold,
+        sentinel.StableSuccessThreshold));
+});
+
 app.Run();
 
 public partial class Program;
@@ -103,3 +115,4 @@ public sealed record HealthLiveResponse(string Status, string Service);
 public sealed record HealthReadyResponse(string Status, IReadOnlyDictionary<string, object?> Checks);
 public sealed record GatewayStatusResponse(string Service, string Status, string DatabasePath, string DenCoreMode, string DenChannelsMode, SentinelStatusSummary Sentinel);
 public sealed record SentinelStatusSummary(string SentinelId, string State, int PollIntervalSeconds, int BindingTtlMinutes);
+public sealed record SentinelStatusResponse(string SentinelId, string State, int PollIntervalSeconds, int DegradedFailureThreshold, int DownFailureThreshold, int StableSuccessThreshold);

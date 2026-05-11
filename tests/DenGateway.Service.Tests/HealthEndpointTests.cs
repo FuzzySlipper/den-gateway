@@ -60,8 +60,22 @@ public class HealthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.Equal("normal", status.Sentinel.State);
     }
 
+    [Fact]
+    public async Task SentinelStatusEndpointReportsInitialNormalState()
+    {
+        using var client = _factory.CreateClient();
+
+        var status = await client.GetFromJsonAsync<SentinelStatusEndpointResponse>("/api/sentinel/status");
+
+        Assert.NotNull(status);
+        Assert.Equal("den-k8-sentinel-1", status.SentinelId);
+        Assert.Equal("normal", status.State);
+        Assert.Equal(10, status.PollIntervalSeconds);
+    }
+
     private sealed record LiveResponse(string Status, string Service);
     private sealed record ReadyResponse(string Status, Dictionary<string, object> Checks);
     private sealed record GatewayStatus(string Service, string Status, string DatabasePath, string DenCoreMode, string DenChannelsMode, SentinelStatus Sentinel);
     private sealed record SentinelStatus(string SentinelId, string State, int PollIntervalSeconds, int BindingTtlMinutes);
+    private sealed record SentinelStatusEndpointResponse(string SentinelId, string State, int PollIntervalSeconds, int DegradedFailureThreshold, int DownFailureThreshold, int StableSuccessThreshold);
 }

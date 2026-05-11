@@ -11,9 +11,11 @@ This repo currently contains the first .NET skeleton for Den Gateway:
 - `src/DenGateway.Service` — ASP.NET Core service.
 - `tests/DenGateway.Service.Tests` — endpoint smoke tests using `WebApplicationFactory`.
 - `docs/den-gateway-v1-implementation-spec.md` — first-pass v1 implementation spec.
+- `docs/first-pass-follow-ups.md` — cross-project contract follow-ups and stub-mode expectations.
 - `/health/live` — liveness check.
 - `/health/ready` — configuration/dependency-mode readiness check.
 - `/api/gateway/status` — basic configured service status.
+- `/api/sentinel/status` — initial sentinel status/configuration view.
 
 ## Configuration
 
@@ -82,6 +84,7 @@ Then check:
 curl http://127.0.0.1:5000/health/live
 curl http://127.0.0.1:5000/health/ready
 curl http://127.0.0.1:5000/api/gateway/status
+curl http://127.0.0.1:5000/api/sentinel/status
 ```
 
 If Kestrel chooses a different development URL, use the URL printed by `dotnet run`.

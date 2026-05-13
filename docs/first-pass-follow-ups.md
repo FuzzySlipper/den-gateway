@@ -52,9 +52,9 @@ Needed bridge behavior:
 
 Until those contracts land:
 
-- `DenGateway:DenCore:UseStub=true` remains the default.
+- `DenGateway:DenCore:UseStub=false` is the production default now that the Core gateway contract is deployed.
 - `DenGateway:DenChannels:UseStub=true` remains the default.
-- source summaries, event outboxes, reconciliation, channel event cursor, and mirror posting return explicit `not_implemented` / unavailable client results.
+- Den Core source summaries, event outbox, and sentinel reconciliation use the live Core gateway contract; remaining Channels/Hermes pieces still return explicit unavailable results where not implemented.
 - tests pass explicit simulation payloads and fake bindings/memberships.
 - Gateway must not read or write `den-mcp`, `den-channels`, or Hermes state stores directly.
 

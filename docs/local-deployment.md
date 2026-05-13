@@ -56,11 +56,11 @@ This intentionally uses a loopback listener on `127.0.0.1:5300`.
 `src/DenGateway.Service/appsettings.Production.json` defaults:
 
 - database: `/home/dev/den-gateway/data/den-gateway.db`
-- Den Core: `http://127.0.0.1:5199`, still `UseStub=true` until den-mcp #1350 lands
+- Den Core: `http://192.168.1.10:18080/den-core-api`, `UseStub=false` now that den-core gateway contract is deployed
 - Den Channels: `http://192.168.1.10:18080`, `UseStub=false` now that den-channels #1351 is complete
 
 ## Current external dependency state
 
 - Den Channels gateway contracts are consumed through `HttpDenChannelsClient` when `DenGateway:DenChannels:UseStub=false`.
-- Den Core integration remains stubbed until den-mcp #1350 is implemented/deployed.
+- Den Core gateway contracts are consumed through `HttpDenCoreClient` when `DenGateway:DenCore:UseStub=false`.
 - Hermes profile delivery remains outside this service until den-hermes-bridge #1352 lands.

@@ -13,6 +13,23 @@ builder.Services.AddOptions<DenGatewayOptions>()
 var configuredOptions = builder.Configuration.GetSection(DenGatewayOptions.SectionName).Get<DenGatewayOptions>() ?? new DenGatewayOptions();
 builder.Services.AddSingleton(sp => new GatewayDatabase(sp.GetRequiredService<IOptions<DenGatewayOptions>>().Value.Database.Path));
 
+if (configuredOptions.DenCore.UseStub)
+{
+    builder.Services.AddSingleton<IDenCoreClient>(new StubDenCoreClient([]));
+}
+else
+{
+    builder.Services.AddHttpClient<IDenCoreClient, HttpDenCoreClient>(client =>
+    {
+        client.BaseAddress = new Uri(EnsureTrailingSlash(configuredOptions.DenCore.BaseUrl));
+        client.Timeout = TimeSpan.FromSeconds(10);
+        if (!string.IsNullOrWhiteSpace(configuredOptions.ServiceAuth.ServiceToken))
+        {
+            client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", configuredOptions.ServiceAuth.ServiceToken);
+        }
+    });
+}
+
 if (configuredOptions.DenChannels.UseStub)
 {
     builder.Services.AddSingleton<IDenChannelsClient>(new StubDenChannelsClient([]));
@@ -37,13 +54,16 @@ app.MapGet("/", () => Results.Redirect("/health/live"));
 
 app.MapGet("/health/live", () => Results.Ok(new HealthLiveResponse("live", "den-gateway")));
 
-app.MapGet("/health/ready", async (IOptions<DenGatewayOptions> options, IDenChannelsClient denChannelsClient) =>
+app.MapGet("/health/ready", async (IOptions<DenGatewayOptions> options, IDenCoreClient denCoreClient, IDenChannelsClient denChannelsClient) =>
 {
     var value = options.Value;
+    var denCoreHealth = value.DenCore.UseStub
+        ? ServiceHealthResult.Available("stub", "Den Core stub is configured.")
+        : await denCoreClient.GetHealthAsync();
     var denChannelsHealth = value.DenChannels.UseStub
         ? ServiceHealthResult.Available("stub", "Den Channels stub is configured.")
         : await denChannelsClient.GetHealthAsync();
-    var ready = denChannelsHealth.IsAvailable;
+    var ready = denCoreHealth.IsAvailable && denChannelsHealth.IsAvailable;
     var checks = new Dictionary<string, object?>
     {
         ["configuration"] = "ready",
@@ -56,7 +76,11 @@ app.MapGet("/health/ready", async (IOptions<DenGatewayOptions> options, IDenChan
         ["denCore"] = new
         {
             mode = value.DenCore.UseStub ? "stub" : "http",
-            baseUrl = value.DenCore.BaseUrl
+            baseUrl = value.DenCore.BaseUrl,
+            available = denCoreHealth.IsAvailable,
+            status = denCoreHealth.Status,
+            errorCode = denCoreHealth.ErrorCode,
+            message = denCoreHealth.Message
         },
         ["denChannels"] = new
         {
@@ -140,6 +164,8 @@ app.MapPost("/api/deliveries/{id:long}/expire", async (long id, GatewayDatabase 
 
 app.Run();
 
+static string EnsureTrailingSlash(string value) => value.EndsWith("/", StringComparison.Ordinal) ? value : value + "/";
+
 public partial class Program;
 
 public sealed class DenGatewayOptions
@@ -147,7 +173,7 @@ public sealed class DenGatewayOptions
     public const string SectionName = "DenGateway";
 
     public DatabaseOptions Database { get; init; } = new();
-    public ServiceClientOptions DenCore { get; init; } = new() { BaseUrl = "http://127.0.0.1:5199", UseStub = true };
+    public ServiceClientOptions DenCore { get; init; } = new() { BaseUrl = "http://192.168.1.10:18080/den-core-api", UseStub = true };
     public ServiceClientOptions DenChannels { get; init; } = new() { BaseUrl = "http://192.168.1.10:18080", UseStub = true };
     public ServiceAuthOptions ServiceAuth { get; init; } = new();
     public SentinelOptions Sentinel { get; init; } = new();

@@ -1,3 +1,4 @@
+using DenGateway.Service.Clients;
 using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -8,15 +9,33 @@ builder.Services.AddOptions<DenGatewayOptions>()
     .Validate(options => !string.IsNullOrWhiteSpace(options.Sentinel.SentinelId), "DenGateway:Sentinel:SentinelId is required")
     .ValidateOnStart();
 
+var configuredOptions = builder.Configuration.GetSection(DenGatewayOptions.SectionName).Get<DenGatewayOptions>() ?? new DenGatewayOptions();
+if (configuredOptions.DenChannels.UseStub)
+{
+    builder.Services.AddSingleton<IDenChannelsClient>(new StubDenChannelsClient([]));
+}
+else
+{
+    builder.Services.AddHttpClient<IDenChannelsClient, HttpDenChannelsClient>(client =>
+    {
+        client.BaseAddress = new Uri(configuredOptions.DenChannels.BaseUrl);
+        client.Timeout = TimeSpan.FromSeconds(10);
+    });
+}
+
 var app = builder.Build();
 
 app.MapGet("/", () => Results.Redirect("/health/live"));
 
 app.MapGet("/health/live", () => Results.Ok(new HealthLiveResponse("live", "den-gateway")));
 
-app.MapGet("/health/ready", (IOptions<DenGatewayOptions> options) =>
+app.MapGet("/health/ready", async (IOptions<DenGatewayOptions> options, IDenChannelsClient denChannelsClient) =>
 {
     var value = options.Value;
+    var denChannelsHealth = value.DenChannels.UseStub
+        ? ServiceHealthResult.Available("stub", "Den Channels stub is configured.")
+        : await denChannelsClient.GetHealthAsync();
+    var ready = denChannelsHealth.IsAvailable;
     var checks = new Dictionary<string, object?>
     {
         ["configuration"] = "ready",
@@ -34,11 +53,17 @@ app.MapGet("/health/ready", (IOptions<DenGatewayOptions> options) =>
         ["denChannels"] = new
         {
             mode = value.DenChannels.UseStub ? "stub" : "http",
-            baseUrl = value.DenChannels.BaseUrl
+            baseUrl = value.DenChannels.BaseUrl,
+            available = denChannelsHealth.IsAvailable,
+            status = denChannelsHealth.Status,
+            errorCode = denChannelsHealth.ErrorCode,
+            message = denChannelsHealth.Message
         }
     };
 
-    return Results.Ok(new HealthReadyResponse("ready", checks));
+    return ready
+        ? Results.Ok(new HealthReadyResponse("ready", checks))
+        : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
 });
 
 app.MapGet("/api/gateway/status", (IOptions<DenGatewayOptions> options) =>

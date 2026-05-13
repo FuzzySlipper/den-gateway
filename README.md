@@ -12,6 +12,7 @@ This repo currently contains the first .NET skeleton for Den Gateway:
 - `tests/DenGateway.Service.Tests` — endpoint smoke tests using `WebApplicationFactory`.
 - `docs/den-gateway-v1-implementation-spec.md` — first-pass v1 implementation spec.
 - `docs/first-pass-follow-ups.md` — cross-project contract follow-ups and stub-mode expectations.
+- `docs/local-deployment.md` — local publish/run/systemd instructions.
 - `/health/live` — liveness check.
 - `/health/ready` — configuration/dependency-mode readiness check.
 - `/api/gateway/status` — basic configured service status.
@@ -71,6 +72,14 @@ dotnet restore DenGateway.slnx
 dotnet build DenGateway.slnx
 dotnet test DenGateway.slnx
 ```
+
+## Publish locally
+
+```bash
+./scripts/publish-local.sh
+```
+
+See `docs/local-deployment.md` for manual run and systemd user-service instructions.
 
 ## Run locally
 

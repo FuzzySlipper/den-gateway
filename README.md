@@ -17,6 +17,8 @@ This repo currently contains the first .NET skeleton for Den Gateway:
 - `/health/ready` — configuration/dependency-mode readiness check.
 - `/api/gateway/status` — basic configured service status.
 - `/api/sentinel/status` — initial sentinel status/configuration view.
+- `/api/deliveries/claim` — atomic adapter claim endpoint for pending delivery requests.
+- `/api/deliveries/{id}/delivered`, `/ack`, `/fail`, `/complete`, `/expire` — structured delivery callback endpoints with attempt/ack metadata.
 
 ## Configuration
 

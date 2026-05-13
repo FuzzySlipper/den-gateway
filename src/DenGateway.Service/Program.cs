@@ -1,4 +1,5 @@
 using DenGateway.Service.Clients;
+using DenGateway.Service.Persistence;
 using Microsoft.Extensions.Options;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -10,6 +11,8 @@ builder.Services.AddOptions<DenGatewayOptions>()
     .ValidateOnStart();
 
 var configuredOptions = builder.Configuration.GetSection(DenGatewayOptions.SectionName).Get<DenGatewayOptions>() ?? new DenGatewayOptions();
+builder.Services.AddSingleton(sp => new GatewayDatabase(sp.GetRequiredService<IOptions<DenGatewayOptions>>().Value.Database.Path));
+
 if (configuredOptions.DenChannels.UseStub)
 {
     builder.Services.AddSingleton<IDenChannelsClient>(new StubDenChannelsClient([]));
@@ -24,6 +27,11 @@ else
 }
 
 var app = builder.Build();
+
+if (app.Services.GetRequiredService<IOptions<DenGatewayOptions>>().Value.Database.ApplyMigrationsOnStartup)
+{
+    await app.Services.GetRequiredService<GatewayDatabase>().InitializeAsync();
+}
 
 app.MapGet("/", () => Results.Redirect("/health/live"));
 
@@ -92,6 +100,42 @@ app.MapGet("/api/sentinel/status", (IOptions<DenGatewayOptions> options) =>
         sentinel.DegradedFailureThreshold,
         sentinel.DownFailureThreshold,
         sentinel.StableSuccessThreshold));
+});
+
+app.MapPost("/api/deliveries/claim", async (GatewayDatabase database, DeliveryClaimRequest request, CancellationToken cancellationToken) =>
+{
+    var result = await database.ClaimDeliveriesAsync(request, cancellationToken);
+    return Results.Ok(result);
+});
+
+app.MapPost("/api/deliveries/{id:long}/delivered", async (long id, GatewayDatabase database, DeliveryCallbackRequest request, CancellationToken cancellationToken) =>
+{
+    var result = await database.ApplyDeliveryCallbackAsync(id, "delivered", request, cancellationToken);
+    return result.Status == "not_found" ? Results.NotFound(result) : Results.Ok(result);
+});
+
+app.MapPost("/api/deliveries/{id:long}/ack", async (long id, GatewayDatabase database, DeliveryCallbackRequest request, CancellationToken cancellationToken) =>
+{
+    var result = await database.ApplyDeliveryCallbackAsync(id, "acknowledged", request, cancellationToken);
+    return result.Status == "not_found" ? Results.NotFound(result) : Results.Ok(result);
+});
+
+app.MapPost("/api/deliveries/{id:long}/fail", async (long id, GatewayDatabase database, DeliveryCallbackRequest request, CancellationToken cancellationToken) =>
+{
+    var result = await database.ApplyDeliveryCallbackAsync(id, "failed", request, cancellationToken);
+    return result.Status == "not_found" ? Results.NotFound(result) : Results.Ok(result);
+});
+
+app.MapPost("/api/deliveries/{id:long}/complete", async (long id, GatewayDatabase database, DeliveryCallbackRequest request, CancellationToken cancellationToken) =>
+{
+    var result = await database.ApplyDeliveryCallbackAsync(id, "completed", request, cancellationToken);
+    return result.Status == "not_found" ? Results.NotFound(result) : Results.Ok(result);
+});
+
+app.MapPost("/api/deliveries/{id:long}/expire", async (long id, GatewayDatabase database, DeliveryCallbackRequest request, CancellationToken cancellationToken) =>
+{
+    var result = await database.ApplyDeliveryCallbackAsync(id, "expired", request, cancellationToken);
+    return result.Status == "not_found" ? Results.NotFound(result) : Results.Ok(result);
 });
 
 app.Run();

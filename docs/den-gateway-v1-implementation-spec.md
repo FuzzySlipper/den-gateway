@@ -125,18 +125,19 @@ Fields:
 - `reason` text nullable;
 - `context_summary` text nullable;
 - `context_link` text nullable;
+- `metadata_json` text not null default `{}` for bounded source/delivery metadata copied into DTOs;
 - `status` text: `pending`, `suppressed`, `delivering`, `delivered`, `acknowledged`, `completed`, `failed`, `expired`;
 - `suppression_reason` text nullable;
 - `dedupe_key` text not null unique;
 - `cascade_depth` integer default 0;
 - `attempt_count` integer default 0;
-- `next_attempt_at`, `expires_at`, `created_at`, `updated_at` text UTC.
+- `lease_expires_at`, `next_attempt_at`, `expires_at`, `created_at`, `updated_at` text UTC.
 
 ### `delivery_attempts`
 
 Append-only attempt/audit rows.
 
-Fields: `id`, `delivery_request_id`, `adapter_binding_id`, `attempt_number`, `status`, `error_code`, `error_message`, `payload_json`, `created_at`.
+Fields: `id`, `delivery_request_id`, `adapter_binding_id`, `attempt_number`, `status`, `error_code`, `error_message`, `ack_kind`, `external_message_id`, `session_id`, `observed_at`, `payload_json`, `created_at`.
 
 ### `sentinel_state`
 
@@ -184,10 +185,13 @@ Deliveries and simulation:
 - `POST /api/deliveries` creates a delivery request or records a suppressed request with reason.
 - `GET /api/deliveries?status=&targetIdentity=&projectId=&afterId=&limit=` lists delivery requests.
 - `GET /api/deliveries/{id}` returns request plus attempts.
+- `POST /api/deliveries/claim` atomically selects eligible pending deliveries for an adapter binding, transitions them to `delivering`, appends attempt rows, and leases them for a bounded interval. Claim filters: `adapter_kind`, `adapter_instance_id`, `project_id`, `agent_identity`, `role`, `accepted_delivery_modes`, `limit`, and `lease_seconds`.
 - `POST /api/deliveries/{id}/mark-delivering` records claim/attempt start.
-- `POST /api/deliveries/{id}/ack` marks delivered/acknowledged.
-- `POST /api/deliveries/{id}/fail` records failed attempt and retry/failed status.
-- `POST /api/deliveries/{id}/complete` marks completed.
+- `POST /api/deliveries/{id}/delivered` marks delivered and accepts structured callback metadata: `attempt_id`, `ack_kind`, `adapter_kind`, `adapter_instance_id`, `external_message_id`, `session_id`, `observed_at`, and bounded `metadata_json`.
+- `POST /api/deliveries/{id}/ack` marks acknowledged with the same callback metadata.
+- `POST /api/deliveries/{id}/fail` records failed attempt and retry/failed status with the same callback metadata plus optional `error_code`/`error_message`.
+- `POST /api/deliveries/{id}/complete` marks completed with idempotent terminal callback handling for duplicate bridge retries where practical.
+- `POST /api/deliveries/{id}/expire` marks expired with idempotent terminal callback handling for duplicate bridge retries where practical.
 
 Sentinel/operator:
 

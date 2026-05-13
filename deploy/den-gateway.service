@@ -11,7 +11,7 @@ Environment=ASPNETCORE_ENVIRONMENT=Production
 Environment=DenGateway__Database__Path=/home/dev/den-gateway/data/den-gateway.db
 Environment=DenGateway__DenCore__BaseUrl=http://127.0.0.1:5199
 Environment=DenGateway__DenCore__UseStub=true
-Environment=DenGateway__DenChannels__BaseUrl=http://127.0.0.1:5299
+Environment=DenGateway__DenChannels__BaseUrl=http://192.168.1.10:18080
 Environment=DenGateway__DenChannels__UseStub=false
 Restart=on-failure
 RestartSec=5

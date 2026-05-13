@@ -104,7 +104,7 @@ public sealed class DenGatewayOptions
 
     public DatabaseOptions Database { get; init; } = new();
     public ServiceClientOptions DenCore { get; init; } = new() { BaseUrl = "http://127.0.0.1:5199", UseStub = true };
-    public ServiceClientOptions DenChannels { get; init; } = new() { BaseUrl = "http://127.0.0.1:5299", UseStub = true };
+    public ServiceClientOptions DenChannels { get; init; } = new() { BaseUrl = "http://192.168.1.10:18080", UseStub = true };
     public ServiceAuthOptions ServiceAuth { get; init; } = new();
     public SentinelOptions Sentinel { get; init; } = new();
 }

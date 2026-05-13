@@ -34,7 +34,7 @@ Configuration lives under the `DenGateway` section.
       "UseStub": true
     },
     "DenChannels": {
-      "BaseUrl": "http://127.0.0.1:5299",
+      "BaseUrl": "http://192.168.1.10:18080",
       "UseStub": true
     },
     "ServiceAuth": {
@@ -58,7 +58,7 @@ Environment variable equivalents use double underscores, for example:
 DenGateway__Database__Path=/var/lib/den-gateway/den-gateway.db
 DenGateway__DenCore__BaseUrl=http://127.0.0.1:5199
 DenGateway__DenCore__UseStub=true
-DenGateway__DenChannels__BaseUrl=http://127.0.0.1:5299
+DenGateway__DenChannels__BaseUrl=http://192.168.1.10:18080
 DenGateway__DenChannels__UseStub=true
 DenGateway__Sentinel__SentinelId=den-k8-sentinel-1
 ```

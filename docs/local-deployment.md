@@ -57,7 +57,7 @@ This intentionally uses a loopback listener on `127.0.0.1:5300`.
 
 - database: `/home/dev/den-gateway/data/den-gateway.db`
 - Den Core: `http://127.0.0.1:5199`, still `UseStub=true` until den-mcp #1350 lands
-- Den Channels: `http://127.0.0.1:5299`, `UseStub=false` now that den-channels #1351 is complete
+- Den Channels: `http://192.168.1.10:18080`, `UseStub=false` now that den-channels #1351 is complete
 
 ## Current external dependency state
 

@@ -7,6 +7,50 @@ namespace DenGateway.Service.Tests;
 public class HttpDenCoreClientTests
 {
     [Fact]
+    public async Task ListActiveBindingsReadsCoreGatewayItemsProjection()
+    {
+        using var client = new HttpClient(new JsonHandler("""
+            {
+              "generated_at": "2026-05-14T07:32:06Z",
+              "items": [
+                {
+                  "instance_id": "den-k8plus:den-hermes-runner:coder:canary",
+                  "project_id": "den-hermes-bridge",
+                  "agent_identity": "den-hermes-runner",
+                  "agent_family": "hermes",
+                  "role": "coder",
+                  "transport_kind": "hermes_profile",
+                  "session_id": "den-k8plus-den-hermes-runner-coder-canary",
+                  "status": "active",
+                  "checked_in_at": "2026-05-14T07:31:23Z",
+                  "last_heartbeat": "2026-05-14T07:31:23Z",
+                  "metadata": {"profile":"den-hermes-runner","scope":"canary"}
+                }
+              ]
+            }
+            """))
+        {
+            BaseAddress = new Uri("http://den-core.test/")
+        };
+        var core = new HttpDenCoreClient(client);
+
+        var result = await core.ListActiveBindingsAsync();
+
+        Assert.True(result.IsAvailable);
+        var item = Assert.Single(result.Items);
+        Assert.Equal("hermes_profile", item.AdapterKind);
+        Assert.Equal("den-k8plus:den-hermes-runner:coder:canary", item.AdapterInstanceId);
+        Assert.Equal("den-hermes-runner", item.AgentIdentity);
+        Assert.Equal("den-hermes-bridge", item.ProjectId);
+        Assert.Equal("coder", item.Role);
+        Assert.Equal("active", item.Status);
+        Assert.Equal("den-hermes-runner", item.Metadata["profile"]);
+        Assert.Equal("canary", item.Metadata["scope"]);
+        Assert.Equal("hermes", item.Metadata["agentFamily"]);
+        Assert.Equal("den-k8plus-den-hermes-runner-coder-canary", item.Metadata["sessionId"]);
+    }
+
+    [Fact]
     public async Task SourceSummaryFlattensNestedGatewayMetadataForSyntheticSentinelEvents()
     {
         using var client = new HttpClient(new JsonHandler("""

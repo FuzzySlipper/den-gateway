@@ -51,7 +51,8 @@ public sealed class HttpDenCoreClient : IDenCoreClient
             return ClientListResult<GatewayBindingSnapshot>.Unavailable("invalid_response", "Den Core gateway binding projection returned an empty or invalid response.");
         }
 
-        var bindings = (dto.Bindings ?? Array.Empty<GatewayBindingDto>()).Where(binding => !string.IsNullOrWhiteSpace(binding.InstanceId)).Select(ToSnapshot).ToArray();
+        var bindingDtos = dto.Items ?? dto.Bindings ?? Array.Empty<GatewayBindingDto>();
+        var bindings = bindingDtos.Where(binding => !string.IsNullOrWhiteSpace(binding.InstanceId)).Select(ToSnapshot).ToArray();
         return ClientListResult<GatewayBindingSnapshot>.Available(bindings);
     }
 
@@ -236,7 +237,9 @@ public sealed class HttpDenCoreClient : IDenCoreClient
         [property: JsonPropertyName("checked_at")] string? CheckedAt,
         [property: JsonPropertyName("checks")] JsonElement? Checks);
 
-    private sealed record GatewayBindingsDto([property: JsonPropertyName("bindings")] IReadOnlyList<GatewayBindingDto> Bindings);
+    private sealed record GatewayBindingsDto(
+        [property: JsonPropertyName("items")] IReadOnlyList<GatewayBindingDto>? Items,
+        [property: JsonPropertyName("bindings")] IReadOnlyList<GatewayBindingDto>? Bindings);
 
     private sealed record GatewayBindingDto(
         [property: JsonPropertyName("instance_id")] string InstanceId,

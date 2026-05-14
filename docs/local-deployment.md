@@ -51,6 +51,16 @@ systemctl --user status den-gateway.service
 
 This intentionally uses a loopback listener on `127.0.0.1:5300`.
 
+## Live visible-agent smoke
+
+After the service is published and restarted, run:
+
+```bash
+/home/dev/den-gateway/scripts/live-visible-agent-smoke.py
+```
+
+The smoke posts a marked synthetic sentinel ops event into Den Core, verifies it appears in the Core outbox, polls Gateway ingestion, performs a Hermes-style claim, and completes the delivery with a structured callback. It uses only HTTP contracts and does not require secrets.
+
 ## Production defaults
 
 `src/DenGateway.Service/appsettings.Production.json` defaults:

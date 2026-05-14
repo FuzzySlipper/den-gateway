@@ -3,6 +3,7 @@ using DenGateway.Service.Clients;
 using DenGateway.Service.DeliveryLoop;
 using DenGateway.Service.Persistence;
 using Microsoft.Extensions.Options;
+using System.Text.Json.Serialization;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -143,6 +144,12 @@ app.MapPost("/api/deliveries/claim", async (GatewayDatabase database, DeliveryCl
     return Results.Ok(result);
 });
 
+app.MapPut("/api/adapter-bindings/heartbeat", async (GatewayDatabase database, AdapterBindingHeartbeatRequest request, CancellationToken cancellationToken) =>
+{
+    var bindingId = await database.UpsertAdapterBindingHeartbeatAsync(request.ToHeartbeat(), cancellationToken);
+    return Results.Ok(new AdapterBindingHeartbeatResponse(bindingId));
+});
+
 app.MapPost("/api/deliveries/{id:long}/delivered", async (long id, GatewayDatabase database, DeliveryCallbackRequest request, CancellationToken cancellationToken) =>
 {
     var result = await database.ApplyDeliveryCallbackAsync(id, "delivered", request, cancellationToken);
@@ -242,3 +249,32 @@ public sealed record HealthReadyResponse(string Status, IReadOnlyDictionary<stri
 public sealed record GatewayStatusResponse(string Service, string Status, string DatabasePath, string DenCoreMode, string DenChannelsMode, SentinelStatusSummary Sentinel, BindingSnapshotHealth Bindings);
 public sealed record SentinelStatusSummary(string SentinelId, string State, int PollIntervalSeconds, int BindingTtlMinutes);
 public sealed record SentinelStatusResponse(string SentinelId, string State, int PollIntervalSeconds, int DegradedFailureThreshold, int DownFailureThreshold, int StableSuccessThreshold, BindingSnapshotHealth Bindings);
+
+public sealed record AdapterBindingHeartbeatRequest(
+    [property: JsonPropertyName("adapter_kind")] string AdapterKind,
+    [property: JsonPropertyName("adapter_instance_id")] string AdapterInstanceId,
+    [property: JsonPropertyName("agent_identity")] string? AgentIdentity,
+    [property: JsonPropertyName("user_identity")] string? UserIdentity,
+    [property: JsonPropertyName("project_id")] string? ProjectId,
+    [property: JsonPropertyName("role")] string? Role,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("capabilities_json")] string? CapabilitiesJson,
+    [property: JsonPropertyName("metadata_json")] string? MetadataJson,
+    [property: JsonPropertyName("last_seen_at")] DateTimeOffset? LastSeenAt,
+    [property: JsonPropertyName("expires_at")] DateTimeOffset? ExpiresAt)
+{
+    public AdapterBindingHeartbeat ToHeartbeat() => new(
+        AdapterKind,
+        AdapterInstanceId,
+        AgentIdentity,
+        UserIdentity,
+        ProjectId,
+        Role,
+        string.IsNullOrWhiteSpace(Status) ? "active" : Status,
+        string.IsNullOrWhiteSpace(CapabilitiesJson) ? "{}" : CapabilitiesJson,
+        string.IsNullOrWhiteSpace(MetadataJson) ? "{}" : MetadataJson,
+        LastSeenAt ?? DateTimeOffset.UtcNow,
+        ExpiresAt);
+}
+
+public sealed record AdapterBindingHeartbeatResponse([property: JsonPropertyName("binding_id")] long BindingId);

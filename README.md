@@ -18,6 +18,7 @@ This repo currently contains the first .NET skeleton for Den Gateway:
 - `/api/gateway/status` — basic configured service status.
 - `/api/sentinel/status` — initial sentinel status/configuration view.
 - `/api/deliveries/claim` — atomic adapter claim endpoint for pending delivery requests.
+- `PUT /api/adapter-bindings/heartbeat` — upserts an active adapter binding for Hermes/profile claimers.
 - `/api/deliveries/{id}/delivered`, `/ack`, `/fail`, `/complete`, `/expire` — structured delivery callback endpoints with attempt/ack metadata.
 
 ## Configuration
@@ -74,6 +75,25 @@ dotnet restore DenGateway.slnx
 dotnet build DenGateway.slnx
 dotnet test DenGateway.slnx
 ```
+
+## Live visible-agent smoke
+
+After publishing/restarting the local service on `127.0.0.1:5300`, run the end-to-end synthetic smoke:
+
+```bash
+./scripts/live-visible-agent-smoke.py
+```
+
+The smoke uses only HTTP contracts and prints pass/fail evidence for:
+
+1. Gateway readiness.
+2. Den Core gateway readiness and event outbox visibility.
+3. Den Channels gateway health.
+4. A synthetic Core sentinel ops event with an explicit dedupe key.
+5. Gateway ingestion from Core into owned delivery state.
+6. Hermes-style adapter binding heartbeat, delivery claim, and completion callback.
+
+It does not require secrets. Durable writes are limited to clearly marked synthetic Den Core ops entries plus Gateway-owned binding/delivery state. Override URLs and target identity with `GATEWAY_URL`, `DEN_CORE_URL`, `DEN_CHANNELS_URL`, `DEN_GATEWAY_SMOKE_AGENT`, and related `DEN_GATEWAY_SMOKE_*` environment variables.
 
 ## Publish locally
 

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace DenGateway.Service.Clients;
 
@@ -83,10 +84,10 @@ public sealed class HttpDenCoreClient : IDenCoreClient
                 Title: dto.Title,
                 Summary: dto.Summary,
                 DeepLink: dto.DeepLink,
-                OccurredAt: ParseDateTimeOffset(dto.OccurredAt),
+                OccurredAt: ParseDateTimeOffset(dto.OccurredAt ?? dto.CreatedAt ?? string.Empty),
                 Actor: dto.Actor,
                 Severity: dto.Severity,
-                Metadata: dto.Metadata ?? new Dictionary<string, string>()));
+                Metadata: FlattenMetadata(dto.Metadata)));
     }
 
     public async Task<ClientListResult<GatewayOutboxEvent>> ReadEventOutboxAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default)
@@ -117,14 +118,14 @@ public sealed class HttpDenCoreClient : IDenCoreClient
 
         return ClientListResult<GatewayOutboxEvent>.Available(dto.Items.Select(item => new GatewayOutboxEvent(
             Cursor: item.Cursor,
-            EventId: item.EventId,
+            EventId: string.IsNullOrWhiteSpace(item.EventId) ? item.Cursor : item.EventId,
             EventType: item.EventType,
-            ProjectId: item.ProjectId,
+            ProjectId: item.ProjectId ?? item.SourceProjectId,
             SourceKind: item.SourceKind,
             SourceId: item.SourceId,
             OccurredAt: ParseDateTimeOffset(item.OccurredAt),
             Actor: item.Actor,
-            SummaryHint: item.SummaryHint,
+            SummaryHint: item.SummaryHint ?? item.Summary ?? string.Empty,
             DeepLink: item.DeepLink,
             Severity: item.Severity,
             DedupeKey: item.DedupeKey)).ToArray());
@@ -192,11 +193,104 @@ public sealed class HttpDenCoreClient : IDenCoreClient
         return string.IsNullOrWhiteSpace(value) ? null : ParseDateTimeOffset(value);
     }
 
-    private sealed record GatewayReadinessDto(string? Status, string? Service, string? CheckedAt, JsonElement? Checks);
-    private sealed record GatewayBindingsDto(IReadOnlyList<GatewayBindingDto> Bindings);
-    private sealed record GatewayBindingDto(string InstanceId, string? ProjectId, string? AgentIdentity, string? AgentFamily, string? Role, string? TransportKind, string? SessionId, string Status, string? CheckedInAt, string? LastHeartbeat, IReadOnlyDictionary<string, string>? Metadata);
-    private sealed record SourceSummaryDto(string SourceKind, string SourceId, string? SourceProjectId, string Title, string Summary, string DeepLink, string OccurredAt, string Actor, string Severity, IReadOnlyDictionary<string, string>? Metadata);
-    private sealed record OutboxDto(IReadOnlyList<OutboxItemDto> Items);
-    private sealed record OutboxItemDto(string Cursor, string EventId, string EventType, string? ProjectId, string SourceKind, string SourceId, string OccurredAt, string Actor, string SummaryHint, string? DeepLink, string Severity, string DedupeKey);
-    private sealed record GatewaySentinelEventRequest(string SentinelId, string EventType, string State, string? ProjectId, string? OutageId, string? Reason, DateTimeOffset ObservedAt, string? Cursor, IReadOnlyDictionary<string, string> Metadata, string DedupeKey);
+    private static IReadOnlyDictionary<string, string> FlattenMetadata(JsonElement? metadata)
+    {
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        if (metadata is { ValueKind: JsonValueKind.Object } element)
+        {
+            AddMetadataValues(element, values);
+        }
+
+        return values;
+    }
+
+    private static void AddMetadataValues(JsonElement element, Dictionary<string, string> values)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        foreach (var property in element.EnumerateObject())
+        {
+            switch (property.Value.ValueKind)
+            {
+                case JsonValueKind.String:
+                    values[property.Name] = property.Value.GetString() ?? string.Empty;
+                    break;
+                case JsonValueKind.Number:
+                case JsonValueKind.True:
+                case JsonValueKind.False:
+                    values[property.Name] = property.Value.ToString();
+                    break;
+                case JsonValueKind.Object:
+                    AddMetadataValues(property.Value, values);
+                    break;
+            }
+        }
+    }
+
+    private sealed record GatewayReadinessDto(
+        [property: JsonPropertyName("status")] string? Status,
+        [property: JsonPropertyName("service")] string? Service,
+        [property: JsonPropertyName("checked_at")] string? CheckedAt,
+        [property: JsonPropertyName("checks")] JsonElement? Checks);
+
+    private sealed record GatewayBindingsDto([property: JsonPropertyName("bindings")] IReadOnlyList<GatewayBindingDto> Bindings);
+
+    private sealed record GatewayBindingDto(
+        [property: JsonPropertyName("instance_id")] string InstanceId,
+        [property: JsonPropertyName("project_id")] string? ProjectId,
+        [property: JsonPropertyName("agent_identity")] string? AgentIdentity,
+        [property: JsonPropertyName("agent_family")] string? AgentFamily,
+        [property: JsonPropertyName("role")] string? Role,
+        [property: JsonPropertyName("transport_kind")] string? TransportKind,
+        [property: JsonPropertyName("session_id")] string? SessionId,
+        [property: JsonPropertyName("status")] string Status,
+        [property: JsonPropertyName("checked_in_at")] string? CheckedInAt,
+        [property: JsonPropertyName("last_heartbeat")] string? LastHeartbeat,
+        [property: JsonPropertyName("metadata")] IReadOnlyDictionary<string, string>? Metadata);
+
+    private sealed record SourceSummaryDto(
+        [property: JsonPropertyName("source_kind")] string SourceKind,
+        [property: JsonPropertyName("source_id")] string SourceId,
+        [property: JsonPropertyName("source_project_id")] string? SourceProjectId,
+        [property: JsonPropertyName("title")] string Title,
+        [property: JsonPropertyName("summary")] string Summary,
+        [property: JsonPropertyName("deep_link")] string DeepLink,
+        [property: JsonPropertyName("occurred_at")] string? OccurredAt,
+        [property: JsonPropertyName("created_at")] string? CreatedAt,
+        [property: JsonPropertyName("actor")] string Actor,
+        [property: JsonPropertyName("severity")] string Severity,
+        [property: JsonPropertyName("metadata")] JsonElement? Metadata);
+
+    private sealed record OutboxDto([property: JsonPropertyName("items")] IReadOnlyList<OutboxItemDto> Items);
+
+    private sealed record OutboxItemDto(
+        [property: JsonPropertyName("cursor")] string Cursor,
+        [property: JsonPropertyName("event_id")] string? EventId,
+        [property: JsonPropertyName("event_type")] string EventType,
+        [property: JsonPropertyName("project_id")] string? ProjectId,
+        [property: JsonPropertyName("source_project_id")] string? SourceProjectId,
+        [property: JsonPropertyName("source_kind")] string SourceKind,
+        [property: JsonPropertyName("source_id")] string SourceId,
+        [property: JsonPropertyName("occurred_at")] string OccurredAt,
+        [property: JsonPropertyName("actor")] string Actor,
+        [property: JsonPropertyName("summary")] string? Summary,
+        [property: JsonPropertyName("summary_hint")] string? SummaryHint,
+        [property: JsonPropertyName("deep_link")] string? DeepLink,
+        [property: JsonPropertyName("severity")] string Severity,
+        [property: JsonPropertyName("dedupe_key")] string DedupeKey);
+
+    private sealed record GatewaySentinelEventRequest(
+        [property: JsonPropertyName("sentinel_id")] string SentinelId,
+        [property: JsonPropertyName("event_type")] string EventType,
+        [property: JsonPropertyName("state")] string State,
+        [property: JsonPropertyName("project_id")] string? ProjectId,
+        [property: JsonPropertyName("outage_id")] string? OutageId,
+        [property: JsonPropertyName("reason")] string? Reason,
+        [property: JsonPropertyName("observed_at")] DateTimeOffset ObservedAt,
+        [property: JsonPropertyName("cursor")] string? Cursor,
+        [property: JsonPropertyName("metadata")] IReadOnlyDictionary<string, string> Metadata,
+        [property: JsonPropertyName("dedupe_key")] string DedupeKey);
 }

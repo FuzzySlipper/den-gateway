@@ -188,6 +188,48 @@ public class DeliveryClaimTests
     }
 
     [Fact]
+    public async Task AdapterBindingHeartbeatEndpointUpsertsBindingForSmokeClaims()
+    {
+        var databasePath = CreateTempDatabasePath();
+        await using var factory = new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder => builder.ConfigureAppConfiguration((_, config) =>
+            {
+                config.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["DenGateway:Database:Path"] = databasePath,
+                    ["DenGateway:DenCore:UseStub"] = "true",
+                    ["DenGateway:DenChannels:UseStub"] = "true"
+                });
+            }));
+        using var client = factory.CreateClient();
+
+        var response = await client.PutAsJsonAsync("/api/adapter-bindings/heartbeat", new
+        {
+            adapter_kind = "hermes_profile",
+            adapter_instance_id = "den-gateway-smoke-local",
+            agent_identity = "den-gateway-runner",
+            project_id = "den-gateway",
+            role = "runner",
+            status = "active",
+            capabilities_json = "{\"delivery_modes\":[\"wake\"]}",
+            metadata_json = "{\"synthetic\":true}",
+            last_seen_at = "2026-05-14T06:05:00Z",
+            expires_at = "2026-05-14T06:15:00Z"
+        });
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<HeartbeatResponse>();
+        Assert.NotNull(body);
+        Assert.True(body.BindingId > 0);
+
+        var database = new GatewayDatabase(databasePath);
+        var claim = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            "hermes_profile", "den-gateway-smoke-local", "den-gateway", "den-gateway-runner", "runner", ["wake"], 1, 60,
+            DateTimeOffset.Parse("2026-05-14T06:06:00Z")));
+        Assert.Empty(claim.Deliveries);
+    }
+
+    [Fact]
     public async Task ClaimEndpointReturnsClaimedDeliveryDtoWithAttemptIdAndSourcePointers()
     {
         var databasePath = CreateTempDatabasePath();
@@ -263,6 +305,8 @@ public class DeliveryClaimTests
         var result = await command.ExecuteScalarAsync();
         return Convert.ToInt64(result);
     }
+
+    private sealed record HeartbeatResponse([property: JsonPropertyName("binding_id")] long BindingId);
 
     private sealed record ClaimEndpointResponse([property: JsonPropertyName("deliveries")] IReadOnlyList<ClaimedDeliveryDto> Deliveries);
     private sealed record ClaimedDeliveryDto(

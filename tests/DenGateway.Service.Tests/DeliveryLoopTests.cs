@@ -152,6 +152,30 @@ public class DeliveryLoopTests
     }
 
     [Fact]
+    public async Task CoreOutboxEventMissingSourcePointerIsSuppressedInsteadOfThrowing()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var core = new FakeDenCoreClient
+        {
+            OutboxEvents =
+            [
+                new GatewayOutboxEvent("null-source", "core-event-null", "unknown", "den-gateway", null!, null!, DateTimeOffset.Parse("2026-05-14T04:10:00Z"), "system", "bad event", null, "normal", "core:null-source")
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, core, new FakeDenChannelsClient());
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest("core", "den-gateway", 10, DateTimeOffset.Parse("2026-05-14T04:11:00Z")));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(1, result.SeenCount);
+        Assert.Equal(1, result.SuppressedCount);
+        Assert.Equal(0, result.CreatedCount);
+        Assert.Equal(0, await CountDeliveriesAsync(databasePath));
+    }
+
+    [Fact]
     public async Task PollEndpointRunsDeliveryLoopAndReturnsCounts()
     {
         var databasePath = CreateTempDatabasePath();
@@ -251,7 +275,12 @@ public class DeliveryLoopTests
         public SourceSummary? SourceSummary { get; init; }
         public Task<ServiceHealthResult> GetHealthAsync(CancellationToken cancellationToken = default) => Task.FromResult(ServiceHealthResult.Available("fake", "ok"));
         public Task<ClientListResult<GatewayBindingSnapshot>> ListActiveBindingsAsync(CancellationToken cancellationToken = default) => Task.FromResult(ClientListResult<GatewayBindingSnapshot>.Available([]));
-        public Task<ClientValueResult<SourceSummary>> GetSourceSummaryAsync(string sourceKind, string sourceId, string? projectId, CancellationToken cancellationToken = default) => Task.FromResult(SourceSummary is null ? ClientValueResult<SourceSummary>.Unavailable("not_found", "missing") : ClientValueResult<SourceSummary>.Available(SourceSummary));
+        public Task<ClientValueResult<SourceSummary>> GetSourceSummaryAsync(string sourceKind, string sourceId, string? projectId, CancellationToken cancellationToken = default)
+        {
+            ArgumentNullException.ThrowIfNull(sourceKind);
+            ArgumentNullException.ThrowIfNull(sourceId);
+            return Task.FromResult(SourceSummary is null ? ClientValueResult<SourceSummary>.Unavailable("not_found", "missing") : ClientValueResult<SourceSummary>.Available(SourceSummary));
+        }
         public Task<ClientListResult<GatewayOutboxEvent>> ReadEventOutboxAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default) => Task.FromResult(OutboxAvailable ? ClientListResult<GatewayOutboxEvent>.Available(OutboxEvents.Take(limit).ToArray()) : ClientListResult<GatewayOutboxEvent>.Unavailable("offline", "core offline"));
         public Task<ClientOperationResult> PostGatewayReconciliationEventsAsync(IReadOnlyList<GatewayReconciliationEvent> events, CancellationToken cancellationToken = default) => Task.FromResult(ClientOperationResult.Completed("ok"));
     }

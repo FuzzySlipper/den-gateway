@@ -65,6 +65,12 @@ public sealed class GatewayDeliveryLoopService
         {
             seen++;
             nextCursor = item.Cursor;
+            if (string.IsNullOrWhiteSpace(item.SourceKind) || string.IsNullOrWhiteSpace(item.SourceId))
+            {
+                suppressed++;
+                continue;
+            }
+
             var summaryResult = await _denCoreClient.GetSourceSummaryAsync(item.SourceKind, item.SourceId, item.ProjectId ?? projectId, cancellationToken);
             var summary = summaryResult.Value;
             var metadata = summary?.Metadata ?? new Dictionary<string, string>();

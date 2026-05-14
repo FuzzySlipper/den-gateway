@@ -1,4 +1,5 @@
 using DenGateway.Service.Clients;
+using DenGateway.Service.DeliveryLoop;
 using DenGateway.Service.Persistence;
 using Microsoft.Extensions.Options;
 
@@ -12,6 +13,7 @@ builder.Services.AddOptions<DenGatewayOptions>()
 
 var configuredOptions = builder.Configuration.GetSection(DenGatewayOptions.SectionName).Get<DenGatewayOptions>() ?? new DenGatewayOptions();
 builder.Services.AddSingleton(sp => new GatewayDatabase(sp.GetRequiredService<IOptions<DenGatewayOptions>>().Value.Database.Path));
+builder.Services.AddSingleton<GatewayDeliveryLoopService>();
 
 if (configuredOptions.DenCore.UseStub)
 {
@@ -160,6 +162,12 @@ app.MapPost("/api/deliveries/{id:long}/expire", async (long id, GatewayDatabase 
 {
     var result = await database.ApplyDeliveryCallbackAsync(id, "expired", request, cancellationToken);
     return result.Status == "not_found" ? Results.NotFound(result) : Results.Ok(result);
+});
+
+app.MapPost("/api/delivery-loop/poll", async (GatewayDeliveryLoopService deliveryLoop, GatewayDeliveryPollRequest request, CancellationToken cancellationToken) =>
+{
+    var result = await deliveryLoop.PollOnceAsync(request, cancellationToken);
+    return result.Status == "rejected" ? Results.BadRequest(result) : Results.Ok(result);
 });
 
 app.Run();

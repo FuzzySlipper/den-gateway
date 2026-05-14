@@ -99,6 +99,102 @@ public sealed class GatewayDatabase
         return Convert.ToInt64(result);
     }
 
+    public async Task<string?> ReadDeliveryLoopCursorAsync(string source, string? projectId, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT cursor_value
+            FROM delivery_ingestion_cursors
+            WHERE source = $source AND project_id_key = ifnull($project_id, '')
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$source", source);
+        command.Parameters.AddWithValue("$project_id", DbValue(projectId));
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
+    public async Task UpsertDeliveryLoopCursorAsync(string source, string? projectId, string cursorValue, DateTimeOffset observedAt, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO delivery_ingestion_cursors (source, project_id, cursor_value, observed_at, updated_at)
+            VALUES ($source, $project_id, $cursor_value, $observed_at, $updated_at)
+            ON CONFLICT(source, project_id_key) DO UPDATE SET
+                cursor_value = excluded.cursor_value,
+                observed_at = excluded.observed_at,
+                updated_at = excluded.updated_at;
+            """;
+        command.Parameters.AddWithValue("$source", source);
+        command.Parameters.AddWithValue("$project_id", DbValue(projectId));
+        command.Parameters.AddWithValue("$cursor_value", cursorValue);
+        command.Parameters.AddWithValue("$observed_at", observedAt.ToString("O"));
+        command.Parameters.AddWithValue("$updated_at", observedAt.ToString("O"));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<DeliveryCreateResult> CreateDeliveryRequestAsync(DeliveryCreateRequest request, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var now = request.CreatedAt.ToString("O");
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync(cancellationToken);
+        await ExecuteNonQueryAsync(connection, "PRAGMA foreign_keys = ON;", cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT OR IGNORE INTO delivery_requests (
+                source_kind, source_id, source_project_id, target_type, target_identity, project_id, task_id,
+                channel_id, delivery_mode, priority, reason, context_summary, context_link, metadata_json,
+                status, suppression_reason, dedupe_key, cascade_depth, attempt_count, next_attempt_at,
+                expires_at, created_at, updated_at
+            ) VALUES (
+                $source_kind, $source_id, $source_project_id, $target_type, $target_identity, $project_id, $task_id,
+                $channel_id, $delivery_mode, $priority, $reason, $context_summary, $context_link, $metadata_json,
+                $status, $suppression_reason, $dedupe_key, $cascade_depth, 0, $next_attempt_at,
+                $expires_at, $created_at, $updated_at
+            )
+            RETURNING id;
+            """;
+        command.Parameters.AddWithValue("$source_kind", request.SourceKind);
+        command.Parameters.AddWithValue("$source_id", DbValue(request.SourceId));
+        command.Parameters.AddWithValue("$source_project_id", DbValue(request.SourceProjectId));
+        command.Parameters.AddWithValue("$target_type", request.TargetType);
+        command.Parameters.AddWithValue("$target_identity", request.TargetIdentity);
+        command.Parameters.AddWithValue("$project_id", DbValue(request.ProjectId));
+        command.Parameters.AddWithValue("$task_id", request.TaskId is null ? DBNull.Value : request.TaskId.Value);
+        command.Parameters.AddWithValue("$channel_id", DbValue(request.ChannelId));
+        command.Parameters.AddWithValue("$delivery_mode", request.DeliveryMode);
+        command.Parameters.AddWithValue("$priority", request.Priority);
+        command.Parameters.AddWithValue("$reason", DbValue(request.Reason));
+        command.Parameters.AddWithValue("$context_summary", DbValue(request.ContextSummary));
+        command.Parameters.AddWithValue("$context_link", DbValue(request.ContextLink));
+        command.Parameters.AddWithValue("$metadata_json", string.IsNullOrWhiteSpace(request.MetadataJson) ? "{}" : request.MetadataJson);
+        command.Parameters.AddWithValue("$status", request.Status);
+        command.Parameters.AddWithValue("$suppression_reason", DbValue(request.SuppressionReason));
+        command.Parameters.AddWithValue("$dedupe_key", request.DedupeKey);
+        command.Parameters.AddWithValue("$cascade_depth", request.CascadeDepth);
+        command.Parameters.AddWithValue("$next_attempt_at", request.NextAttemptAt is null ? DBNull.Value : request.NextAttemptAt.Value.ToString("O"));
+        command.Parameters.AddWithValue("$expires_at", request.ExpiresAt is null ? DBNull.Value : request.ExpiresAt.Value.ToString("O"));
+        command.Parameters.AddWithValue("$created_at", now);
+        command.Parameters.AddWithValue("$updated_at", now);
+
+        var inserted = await command.ExecuteScalarAsync(cancellationToken);
+        if (inserted is not null)
+        {
+            return new DeliveryCreateResult(Convert.ToInt64(inserted), false);
+        }
+
+        await using var lookup = connection.CreateCommand();
+        lookup.CommandText = "SELECT id FROM delivery_requests WHERE dedupe_key = $dedupe_key LIMIT 1;";
+        lookup.Parameters.AddWithValue("$dedupe_key", request.DedupeKey);
+        var existing = await lookup.ExecuteScalarAsync(cancellationToken);
+        return new DeliveryCreateResult(Convert.ToInt64(existing), true);
+    }
+
     public async Task<DeliveryClaimResult> ClaimDeliveriesAsync(DeliveryClaimRequest request, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -629,6 +725,18 @@ public sealed class GatewayDatabase
             updated_at TEXT NOT NULL
         );
         """,
+        """
+        CREATE TABLE IF NOT EXISTS delivery_ingestion_cursors (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            project_id TEXT NULL,
+            project_id_key TEXT GENERATED ALWAYS AS (ifnull(project_id, '')) STORED,
+            cursor_value TEXT NOT NULL,
+            observed_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(source, project_id_key)
+        );
+        """,
         "CREATE INDEX IF NOT EXISTS idx_delivery_requests_status ON delivery_requests(status);",
         "CREATE INDEX IF NOT EXISTS idx_delivery_requests_target ON delivery_requests(target_type, target_identity);",
         "CREATE INDEX IF NOT EXISTS idx_delivery_requests_project ON delivery_requests(project_id);",
@@ -680,6 +788,31 @@ public sealed record ClaimedDeliveryDto(
     [property: JsonPropertyName("metadata_json")] string MetadataJson,
     [property: JsonPropertyName("dedupe_key")] string DedupeKey,
     [property: JsonPropertyName("lease_expires_at")] DateTimeOffset LeaseExpiresAt);
+
+public sealed record DeliveryCreateRequest(
+    string SourceKind,
+    string? SourceId,
+    string? SourceProjectId,
+    string TargetType,
+    string TargetIdentity,
+    string? ProjectId,
+    int? TaskId,
+    string? ChannelId,
+    string DeliveryMode,
+    int Priority,
+    string? Reason,
+    string? ContextSummary,
+    string? ContextLink,
+    string MetadataJson,
+    string Status,
+    string? SuppressionReason,
+    string DedupeKey,
+    int CascadeDepth,
+    DateTimeOffset? NextAttemptAt,
+    DateTimeOffset? ExpiresAt,
+    DateTimeOffset CreatedAt);
+
+public sealed record DeliveryCreateResult(long DeliveryRequestId, bool AlreadyExisted);
 
 public sealed record DeliveryCallbackRequest(
     [property: JsonPropertyName("attempt_id")] long? AttemptId,

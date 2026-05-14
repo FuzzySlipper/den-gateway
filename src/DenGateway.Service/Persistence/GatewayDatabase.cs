@@ -286,19 +286,29 @@ public sealed class GatewayDatabase
 
         try
         {
-            var currentStatus = await ReadDeliveryStatusAsync(connection, deliveryRequestId, cancellationToken);
-            if (currentStatus is null)
+            var current = await ReadDeliveryStateAsync(connection, deliveryRequestId, cancellationToken);
+            if (current is null)
             {
                 await ExecuteNonQueryAsync(connection, "COMMIT;", cancellationToken);
                 return new DeliveryCallbackResult("not_found", false);
             }
+            var currentValue = current.Value;
+
+            var requestStatus = status;
+            DateTimeOffset? nextAttemptAt = null;
+            if (string.Equals(status, "failed", StringComparison.OrdinalIgnoreCase) && currentValue.AttemptCount < 3)
+            {
+                requestStatus = "pending";
+                var backoffSeconds = Math.Min(300, currentValue.AttemptCount * 60);
+                nextAttemptAt = observedAt.AddSeconds(backoffSeconds <= 0 ? 60 : backoffSeconds);
+            }
 
             var attemptStatus = await ReadAttemptStatusAsync(connection, deliveryRequestId, callback.AttemptId, cancellationToken);
-            if (string.Equals(currentStatus, status, StringComparison.OrdinalIgnoreCase)
+            if (string.Equals(currentValue.Status, requestStatus, StringComparison.OrdinalIgnoreCase)
                 && string.Equals(attemptStatus, status, StringComparison.OrdinalIgnoreCase))
             {
                 await ExecuteNonQueryAsync(connection, "COMMIT;", cancellationToken);
-                return new DeliveryCallbackResult(status, false);
+                return new DeliveryCallbackResult(requestStatus, false);
             }
 
             await using (var updateRequest = connection.CreateCommand())
@@ -307,18 +317,20 @@ public sealed class GatewayDatabase
                     UPDATE delivery_requests
                     SET status = $status,
                         updated_at = $updated_at,
-                        lease_expires_at = NULL
+                        lease_expires_at = NULL,
+                        next_attempt_at = $next_attempt_at
                     WHERE id = $id;
                     """;
-                updateRequest.Parameters.AddWithValue("$status", status);
+                updateRequest.Parameters.AddWithValue("$status", requestStatus);
                 updateRequest.Parameters.AddWithValue("$updated_at", observedAt.ToString("O"));
+                updateRequest.Parameters.AddWithValue("$next_attempt_at", nextAttemptAt is null ? DBNull.Value : nextAttemptAt.Value.ToString("O"));
                 updateRequest.Parameters.AddWithValue("$id", deliveryRequestId);
                 await updateRequest.ExecuteNonQueryAsync(cancellationToken);
             }
 
             await UpdateAttemptFromCallbackAsync(connection, deliveryRequestId, status, callback, observedAt, cancellationToken);
             await ExecuteNonQueryAsync(connection, "COMMIT;", cancellationToken);
-            return new DeliveryCallbackResult(status, true);
+            return new DeliveryCallbackResult(requestStatus, true);
         }
         catch
         {
@@ -509,12 +521,18 @@ public sealed class GatewayDatabase
         return Convert.ToInt64(result);
     }
 
-    private static async Task<string?> ReadDeliveryStatusAsync(SqliteConnection connection, long deliveryRequestId, CancellationToken cancellationToken)
+    private static async Task<DeliveryStateRow?> ReadDeliveryStateAsync(SqliteConnection connection, long deliveryRequestId, CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT status FROM delivery_requests WHERE id = $id;";
+        command.CommandText = "SELECT status, attempt_count FROM delivery_requests WHERE id = $id;";
         command.Parameters.AddWithValue("$id", deliveryRequestId);
-        return await command.ExecuteScalarAsync(cancellationToken) as string;
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
+        {
+            return null;
+        }
+
+        return new DeliveryStateRow(reader.GetString(0), reader.GetInt32(1));
     }
 
     private static async Task<string?> ReadAttemptStatusAsync(SqliteConnection connection, long deliveryRequestId, long? attemptId, CancellationToken cancellationToken)
@@ -570,6 +588,7 @@ public sealed class GatewayDatabase
     private static string EscapeJson(string value) => value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal);
 
     private readonly record struct AdapterBindingRow(long Id);
+    private readonly record struct DeliveryStateRow(string Status, int AttemptCount);
 
     private sealed record DeliveryRequestRow(
         long Id,

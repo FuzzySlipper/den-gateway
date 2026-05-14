@@ -139,6 +139,55 @@ public class DeliveryClaimTests
     }
 
     [Fact]
+    public async Task FailCallbackSchedulesRetryUntilMaxAttemptsThenLeavesRequestFailed()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            "hermes_profile", "hermes:den-k8:den-gateway-runner:gateway-main", "den-gateway-runner", null, "den-gateway", "runner", "active", "{}", "{}",
+            DateTimeOffset.Parse("2026-05-13T22:30:00Z"), DateTimeOffset.Parse("2026-05-13T23:30:00Z")));
+        var deliveryId = await InsertDeliveryRequestAsync(databasePath, "den-gateway-runner", "wake", "dedupe:retry:1");
+        var claimResult = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            "hermes_profile", "hermes:den-k8:den-gateway-runner:gateway-main", "den-gateway", "den-gateway-runner", "runner", ["wake"], 1, 60,
+            DateTimeOffset.Parse("2026-05-13T22:31:00Z")));
+        var attemptId = Assert.Single(claimResult.Deliveries).AttemptId;
+
+        var result = await database.ApplyDeliveryCallbackAsync(deliveryId, "failed", new DeliveryCallbackRequest(
+            AttemptId: attemptId,
+            AckKind: "bridge_failed",
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:den-k8:den-gateway-runner:gateway-main",
+            ExternalMessageId: null,
+            SessionId: "session-retry",
+            ObservedAt: DateTimeOffset.Parse("2026-05-13T22:32:00Z"),
+            MetadataJson: "{}",
+            ErrorCode: "transport_unavailable",
+            ErrorMessage: "adapter offline"));
+
+        Assert.Equal("pending", result.Status);
+        Assert.True(result.Changed);
+
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT r.status, r.next_attempt_at, r.lease_expires_at, a.status, a.error_code
+            FROM delivery_requests r
+            JOIN delivery_attempts a ON a.delivery_request_id = r.id
+            WHERE r.id = $id
+            """;
+        command.Parameters.AddWithValue("$id", deliveryId);
+        await using var reader = await command.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("pending", reader.GetString(0));
+        Assert.Equal("2026-05-13T22:33:00.0000000+00:00", reader.GetString(1));
+        Assert.True(reader.IsDBNull(2));
+        Assert.Equal("failed", reader.GetString(3));
+        Assert.Equal("transport_unavailable", reader.GetString(4));
+    }
+
+    [Fact]
     public async Task ClaimEndpointReturnsClaimedDeliveryDtoWithAttemptIdAndSourcePointers()
     {
         var databasePath = CreateTempDatabasePath();

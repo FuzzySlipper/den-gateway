@@ -123,16 +123,18 @@ app.MapGet("/api/gateway/status", async (IOptions<DenGatewayOptions> options, Bi
         Bindings: bindingHealth));
 });
 
-app.MapGet("/api/sentinel/status", (IOptions<DenGatewayOptions> options) =>
+app.MapGet("/api/sentinel/status", async (IOptions<DenGatewayOptions> options, BindingSnapshotService bindingSnapshots, DateTimeOffset? now) =>
 {
     var sentinel = options.Value.Sentinel;
+    var bindingHealth = await bindingSnapshots.GetHealthAsync(now ?? DateTimeOffset.UtcNow);
     return Results.Ok(new SentinelStatusResponse(
         sentinel.SentinelId,
-        "normal",
+        bindingHealth.Status == "degraded" ? "degraded" : "normal",
         sentinel.PollIntervalSeconds,
         sentinel.DegradedFailureThreshold,
         sentinel.DownFailureThreshold,
-        sentinel.StableSuccessThreshold));
+        sentinel.StableSuccessThreshold,
+        bindingHealth));
 });
 
 app.MapPost("/api/deliveries/claim", async (GatewayDatabase database, DeliveryClaimRequest request, CancellationToken cancellationToken) =>
@@ -239,4 +241,4 @@ public sealed record HealthLiveResponse(string Status, string Service);
 public sealed record HealthReadyResponse(string Status, IReadOnlyDictionary<string, object?> Checks);
 public sealed record GatewayStatusResponse(string Service, string Status, string DatabasePath, string DenCoreMode, string DenChannelsMode, SentinelStatusSummary Sentinel, BindingSnapshotHealth Bindings);
 public sealed record SentinelStatusSummary(string SentinelId, string State, int PollIntervalSeconds, int BindingTtlMinutes);
-public sealed record SentinelStatusResponse(string SentinelId, string State, int PollIntervalSeconds, int DegradedFailureThreshold, int DownFailureThreshold, int StableSuccessThreshold);
+public sealed record SentinelStatusResponse(string SentinelId, string State, int PollIntervalSeconds, int DegradedFailureThreshold, int DownFailureThreshold, int StableSuccessThreshold, BindingSnapshotHealth Bindings);

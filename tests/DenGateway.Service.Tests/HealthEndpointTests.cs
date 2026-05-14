@@ -41,6 +41,7 @@ public class HealthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.True(body.Checks.ContainsKey("database"));
         Assert.True(body.Checks.ContainsKey("denCore"));
         Assert.True(body.Checks.ContainsKey("denChannels"));
+        Assert.True(body.Checks.ContainsKey("bindings"));
     }
 
     [Fact]
@@ -71,11 +72,13 @@ public class HealthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.Equal("den-k8-sentinel-1", status.SentinelId);
         Assert.Equal("normal", status.State);
         Assert.Equal(10, status.PollIntervalSeconds);
+        Assert.Equal("unknown", status.Bindings.Status);
     }
 
     private sealed record LiveResponse(string Status, string Service);
     private sealed record ReadyResponse(string Status, Dictionary<string, object> Checks);
     private sealed record GatewayStatus(string Service, string Status, string DatabasePath, string DenCoreMode, string DenChannelsMode, SentinelStatus Sentinel);
     private sealed record SentinelStatus(string SentinelId, string State, int PollIntervalSeconds, int BindingTtlMinutes);
-    private sealed record SentinelStatusEndpointResponse(string SentinelId, string State, int PollIntervalSeconds, int DegradedFailureThreshold, int DownFailureThreshold, int StableSuccessThreshold);
+    private sealed record SentinelStatusEndpointResponse(string SentinelId, string State, int PollIntervalSeconds, int DegradedFailureThreshold, int DownFailureThreshold, int StableSuccessThreshold, TestBindingHealth Bindings);
+    private sealed record TestBindingHealth(string Status);
 }

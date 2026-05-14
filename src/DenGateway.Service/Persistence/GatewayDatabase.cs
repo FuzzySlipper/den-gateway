@@ -99,6 +99,99 @@ public sealed class GatewayDatabase
         return Convert.ToInt64(result);
     }
 
+    public async Task UpsertBindingSnapshotsAsync(IReadOnlyList<BindingSnapshotWrite> snapshots, DateTimeOffset capturedAt, CancellationToken cancellationToken = default)
+    {
+        var snapshotId = $"core-{capturedAt:yyyyMMddHHmmss}";
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync(cancellationToken);
+        foreach (var snapshot in snapshots)
+        {
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                INSERT INTO binding_snapshots (
+                    snapshot_id, captured_at, source_den_generation, agent_identity, project_id, role,
+                    adapter_kind, adapter_instance_id, transport_endpoint, status, last_seen_at, expires_at, metadata_json
+                ) VALUES (
+                    $snapshot_id, $captured_at, $source_den_generation, $agent_identity, $project_id, $role,
+                    $adapter_kind, $adapter_instance_id, $transport_endpoint, $status, $last_seen_at, $expires_at, $metadata_json
+                );
+                """;
+            command.Parameters.AddWithValue("$snapshot_id", snapshotId);
+            command.Parameters.AddWithValue("$captured_at", capturedAt.ToString("O"));
+            command.Parameters.AddWithValue("$source_den_generation", DBNull.Value);
+            command.Parameters.AddWithValue("$agent_identity", DbValue(snapshot.AgentIdentity));
+            command.Parameters.AddWithValue("$project_id", DbValue(snapshot.ProjectId));
+            command.Parameters.AddWithValue("$role", DbValue(snapshot.Role));
+            command.Parameters.AddWithValue("$adapter_kind", snapshot.AdapterKind);
+            command.Parameters.AddWithValue("$adapter_instance_id", snapshot.AdapterInstanceId);
+            command.Parameters.AddWithValue("$transport_endpoint", DbValue(snapshot.TransportEndpoint));
+            command.Parameters.AddWithValue("$status", snapshot.Status);
+            command.Parameters.AddWithValue("$last_seen_at", snapshot.LastSeenAt is null ? DBNull.Value : snapshot.LastSeenAt.Value.ToString("O"));
+            command.Parameters.AddWithValue("$expires_at", snapshot.ExpiresAt is null ? DBNull.Value : snapshot.ExpiresAt.Value.ToString("O"));
+            command.Parameters.AddWithValue("$metadata_json", snapshot.MetadataJson);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
+    public async Task<IReadOnlyList<BindingSnapshotRead>> ListLatestBindingSnapshotsAsync(CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT captured_at, agent_identity, project_id, role, adapter_kind, adapter_instance_id,
+                   transport_endpoint, status, last_seen_at, expires_at, metadata_json
+            FROM binding_snapshots
+            WHERE snapshot_id = (SELECT snapshot_id FROM binding_snapshots ORDER BY captured_at DESC LIMIT 1)
+            ORDER BY adapter_kind, adapter_instance_id;
+            """;
+        var rows = new List<BindingSnapshotRead>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            rows.Add(new BindingSnapshotRead(
+                CapturedAt: DateTimeOffset.Parse(reader.GetString(0)),
+                AgentIdentity: reader.IsDBNull(1) ? null : reader.GetString(1),
+                ProjectId: reader.IsDBNull(2) ? null : reader.GetString(2),
+                Role: reader.IsDBNull(3) ? null : reader.GetString(3),
+                AdapterKind: reader.GetString(4),
+                AdapterInstanceId: reader.GetString(5),
+                TransportEndpoint: reader.IsDBNull(6) ? null : reader.GetString(6),
+                Status: reader.GetString(7),
+                LastSeenAt: reader.IsDBNull(8) ? null : DateTimeOffset.Parse(reader.GetString(8)),
+                ExpiresAt: reader.IsDBNull(9) ? null : DateTimeOffset.Parse(reader.GetString(9)),
+                MetadataJson: reader.GetString(10)));
+        }
+
+        return rows;
+    }
+
+    public async Task<bool> InsertSentinelEventIfChangedAsync(string eventKind, string? targetIdentity, string payloadJson, DateTimeOffset createdAt, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection($"Data Source={_databasePath}");
+        await connection.OpenAsync(cancellationToken);
+        await using var latest = connection.CreateCommand();
+        latest.CommandText = "SELECT event_kind FROM sentinel_events WHERE target_identity IS $target_identity ORDER BY id DESC LIMIT 1;";
+        latest.Parameters.AddWithValue("$target_identity", targetIdentity is null ? DBNull.Value : targetIdentity);
+        var lastKind = await latest.ExecuteScalarAsync(cancellationToken) as string;
+        if (string.Equals(lastKind, eventKind, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        await using var insert = connection.CreateCommand();
+        insert.CommandText = """
+            INSERT INTO sentinel_events (event_kind, target_identity, payload_json, created_at)
+            VALUES ($event_kind, $target_identity, $payload_json, $created_at);
+            """;
+        insert.Parameters.AddWithValue("$event_kind", eventKind);
+        insert.Parameters.AddWithValue("$target_identity", targetIdentity is null ? DBNull.Value : targetIdentity);
+        insert.Parameters.AddWithValue("$payload_json", payloadJson);
+        insert.Parameters.AddWithValue("$created_at", createdAt.ToString("O"));
+        await insert.ExecuteNonQueryAsync(cancellationToken);
+        return true;
+    }
+
     public async Task<string?> ReadDeliveryLoopCursorAsync(string source, string? projectId, CancellationToken cancellationToken = default)
     {
         await using var connection = new SqliteConnection($"Data Source={_databasePath}");
@@ -807,6 +900,9 @@ public sealed record ClaimedDeliveryDto(
     [property: JsonPropertyName("metadata_json")] string MetadataJson,
     [property: JsonPropertyName("dedupe_key")] string DedupeKey,
     [property: JsonPropertyName("lease_expires_at")] DateTimeOffset LeaseExpiresAt);
+
+public sealed record BindingSnapshotWrite(string AdapterKind, string AdapterInstanceId, string? AgentIdentity, string? ProjectId, string? Role, string Status, string? TransportEndpoint, DateTimeOffset? LastSeenAt, DateTimeOffset? ExpiresAt, string MetadataJson);
+public sealed record BindingSnapshotRead(DateTimeOffset CapturedAt, string? AgentIdentity, string? ProjectId, string? Role, string AdapterKind, string AdapterInstanceId, string? TransportEndpoint, string Status, DateTimeOffset? LastSeenAt, DateTimeOffset? ExpiresAt, string MetadataJson);
 
 public sealed record DeliveryCreateRequest(
     string SourceKind,

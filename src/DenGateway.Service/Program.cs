@@ -1,3 +1,4 @@
+using DenGateway.Service.Bindings;
 using DenGateway.Service.Clients;
 using DenGateway.Service.DeliveryLoop;
 using DenGateway.Service.Persistence;
@@ -13,6 +14,8 @@ builder.Services.AddOptions<DenGatewayOptions>()
 
 var configuredOptions = builder.Configuration.GetSection(DenGatewayOptions.SectionName).Get<DenGatewayOptions>() ?? new DenGatewayOptions();
 builder.Services.AddSingleton(sp => new GatewayDatabase(sp.GetRequiredService<IOptions<DenGatewayOptions>>().Value.Database.Path));
+builder.Services.AddSingleton(sp => new BindingSnapshotSettings(sp.GetRequiredService<IOptions<DenGatewayOptions>>().Value.Sentinel.BindingTtlMinutes));
+builder.Services.AddSingleton<BindingSnapshotService>();
 builder.Services.AddSingleton<GatewayDeliveryLoopService>();
 
 if (configuredOptions.DenCore.UseStub)
@@ -56,7 +59,7 @@ app.MapGet("/", () => Results.Redirect("/health/live"));
 
 app.MapGet("/health/live", () => Results.Ok(new HealthLiveResponse("live", "den-gateway")));
 
-app.MapGet("/health/ready", async (IOptions<DenGatewayOptions> options, IDenCoreClient denCoreClient, IDenChannelsClient denChannelsClient) =>
+app.MapGet("/health/ready", async (IOptions<DenGatewayOptions> options, IDenCoreClient denCoreClient, IDenChannelsClient denChannelsClient, BindingSnapshotService bindingSnapshots) =>
 {
     var value = options.Value;
     var denCoreHealth = value.DenCore.UseStub
@@ -66,6 +69,7 @@ app.MapGet("/health/ready", async (IOptions<DenGatewayOptions> options, IDenCore
         ? ServiceHealthResult.Available("stub", "Den Channels stub is configured.")
         : await denChannelsClient.GetHealthAsync();
     var ready = denCoreHealth.IsAvailable && denChannelsHealth.IsAvailable;
+    var bindingHealth = await bindingSnapshots.GetHealthAsync(DateTimeOffset.UtcNow);
     var checks = new Dictionary<string, object?>
     {
         ["configuration"] = "ready",
@@ -92,7 +96,8 @@ app.MapGet("/health/ready", async (IOptions<DenGatewayOptions> options, IDenCore
             status = denChannelsHealth.Status,
             errorCode = denChannelsHealth.ErrorCode,
             message = denChannelsHealth.Message
-        }
+        },
+        ["bindings"] = bindingHealth
     };
 
     return ready
@@ -100,9 +105,10 @@ app.MapGet("/health/ready", async (IOptions<DenGatewayOptions> options, IDenCore
         : Results.StatusCode(StatusCodes.Status503ServiceUnavailable);
 });
 
-app.MapGet("/api/gateway/status", (IOptions<DenGatewayOptions> options) =>
+app.MapGet("/api/gateway/status", async (IOptions<DenGatewayOptions> options, BindingSnapshotService bindingSnapshots, DateTimeOffset? now) =>
 {
     var value = options.Value;
+    var bindingHealth = await bindingSnapshots.GetHealthAsync(now ?? DateTimeOffset.UtcNow);
     return Results.Ok(new GatewayStatusResponse(
         Service: "den-gateway",
         Status: "ready",
@@ -111,9 +117,10 @@ app.MapGet("/api/gateway/status", (IOptions<DenGatewayOptions> options) =>
         DenChannelsMode: value.DenChannels.UseStub ? "stub" : "http",
         Sentinel: new SentinelStatusSummary(
             value.Sentinel.SentinelId,
-            "normal",
+            bindingHealth.Status == "degraded" ? "degraded" : "normal",
             value.Sentinel.PollIntervalSeconds,
-            value.Sentinel.BindingTtlMinutes)));
+            value.Sentinel.BindingTtlMinutes),
+        Bindings: bindingHealth));
 });
 
 app.MapGet("/api/sentinel/status", (IOptions<DenGatewayOptions> options) =>
@@ -170,6 +177,20 @@ app.MapPost("/api/delivery-loop/poll", async (GatewayDeliveryLoopService deliver
     return result.Status == "rejected" ? Results.BadRequest(result) : Results.Ok(result);
 });
 
+app.MapPost("/api/binding-snapshots/refresh", async (BindingSnapshotService bindingSnapshots, BindingSnapshotRefreshRequest request, CancellationToken cancellationToken) =>
+{
+    var result = await bindingSnapshots.RefreshAsync(request.Now ?? DateTimeOffset.UtcNow, cancellationToken);
+    return Results.Ok(result);
+});
+
+app.MapGet("/api/binding-snapshots", async (BindingSnapshotService bindingSnapshots, DateTimeOffset? now, CancellationToken cancellationToken) =>
+{
+    var observedAt = now ?? DateTimeOffset.UtcNow;
+    var items = await bindingSnapshots.ListAsync(observedAt, cancellationToken);
+    var health = await bindingSnapshots.GetHealthAsync(observedAt, cancellationToken);
+    return Results.Ok(new BindingSnapshotListResponse(items, health));
+});
+
 app.Run();
 
 static string EnsureTrailingSlash(string value) => value.EndsWith("/", StringComparison.Ordinal) ? value : value + "/";
@@ -216,6 +237,6 @@ public sealed class SentinelOptions
 
 public sealed record HealthLiveResponse(string Status, string Service);
 public sealed record HealthReadyResponse(string Status, IReadOnlyDictionary<string, object?> Checks);
-public sealed record GatewayStatusResponse(string Service, string Status, string DatabasePath, string DenCoreMode, string DenChannelsMode, SentinelStatusSummary Sentinel);
+public sealed record GatewayStatusResponse(string Service, string Status, string DatabasePath, string DenCoreMode, string DenChannelsMode, SentinelStatusSummary Sentinel, BindingSnapshotHealth Bindings);
 public sealed record SentinelStatusSummary(string SentinelId, string State, int PollIntervalSeconds, int BindingTtlMinutes);
 public sealed record SentinelStatusResponse(string SentinelId, string State, int PollIntervalSeconds, int DegradedFailureThreshold, int DownFailureThreshold, int StableSuccessThreshold);

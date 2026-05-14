@@ -50,7 +50,7 @@ public sealed class HttpDenCoreClient : IDenCoreClient
             return ClientListResult<GatewayBindingSnapshot>.Unavailable("invalid_response", "Den Core gateway binding projection returned an empty or invalid response.");
         }
 
-        var bindings = dto.Bindings.Select(ToSnapshot).ToArray();
+        var bindings = (dto.Bindings ?? Array.Empty<GatewayBindingDto>()).Where(binding => !string.IsNullOrWhiteSpace(binding.InstanceId)).Select(ToSnapshot).ToArray();
         return ClientListResult<GatewayBindingSnapshot>.Available(bindings);
     }
 

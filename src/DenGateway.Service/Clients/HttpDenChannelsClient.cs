@@ -153,9 +153,9 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
             ["maxAutoRepliesPerWindow"] = member.MaxAutoRepliesPerWindow.ToString()
         };
 
-        if (!string.IsNullOrWhiteSpace(member.SettingsJsonPreview))
+        if (!string.IsNullOrWhiteSpace(member.SettingsLabel))
         {
-            settings["settingsJsonPreview"] = member.SettingsJsonPreview;
+            settings["settingsLabel"] = member.SettingsLabel;
         }
 
         return settings;
@@ -180,7 +180,7 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
 
     private sealed record GatewayHealthDto(string Service, string Status, string[] Endpoints);
     private sealed record GatewayMembershipsDto(long ChannelId, string ChannelSlug, string ChannelKind, string? ProjectId, IReadOnlyList<GatewayMemberDto> Members);
-    private sealed record GatewayMemberDto(long Id, string MemberType, string MemberIdentity, string MembershipStatus, string WakePolicy, bool CanSend, int CooldownSeconds, int MaxAutoRepliesPerWindow, string? SettingsJsonPreview);
+    private sealed record GatewayMemberDto(long Id, string MemberType, string MemberIdentity, string MembershipStatus, string WakePolicy, bool CanSend, int CooldownSeconds, int MaxAutoRepliesPerWindow, string? SettingsLabel);
     private sealed record GatewayMessageDto(long Id, long ChannelId, string MessageKind, string SenderType, string SenderIdentity, string? SourceKind, string? SourceId, string? SourceProjectId, string? DedupeKey, string? DeepLink, string? Summary, string Body, string CreatedAt);
     private sealed record GatewayEventsDto(IReadOnlyList<GatewayEventItemDto> Items, long? NextAfterId, bool HasMore);
     private sealed record GatewayEventItemDto(long Id, long ChannelId, string MessageKind, string SenderType, string SenderIdentity, string? SourceKind, string? SourceId, string? SourceProjectId, string? DedupeKey, string? DeepLink, string? Summary, string Body, string CreatedAt);

@@ -18,6 +18,7 @@ builder.Services.AddSingleton(sp => new GatewayDatabase(sp.GetRequiredService<IO
 builder.Services.AddSingleton(sp => new BindingSnapshotSettings(sp.GetRequiredService<IOptions<DenGatewayOptions>>().Value.Sentinel.BindingTtlMinutes));
 builder.Services.AddSingleton<BindingSnapshotService>();
 builder.Services.AddSingleton<GatewayDeliveryLoopService>();
+builder.Services.AddHostedService<GatewayDeliveryLoopHostedService>();
 
 if (configuredOptions.DenCore.UseStub)
 {
@@ -215,6 +216,7 @@ public sealed class DenGatewayOptions
     public ServiceClientOptions DenChannels { get; init; } = new() { BaseUrl = "http://192.168.1.10:18080", UseStub = true };
     public ServiceAuthOptions ServiceAuth { get; init; } = new();
     public SentinelOptions Sentinel { get; init; } = new();
+    public DeliveryLoopOptions DeliveryLoop { get; init; } = new();
 }
 
 public sealed class DatabaseOptions
@@ -242,6 +244,16 @@ public sealed class SentinelOptions
     public int DownFailureThreshold { get; init; } = 4;
     public int StableSuccessThreshold { get; init; } = 4;
     public int BindingTtlMinutes { get; init; } = 120;
+}
+
+public sealed class DeliveryLoopOptions
+{
+    public bool Enabled { get; init; } = false;
+    public string Source { get; init; } = "all";
+    public string? ProjectId { get; init; }
+    public string[] ProjectIds { get; init; } = [];
+    public int PollIntervalSeconds { get; init; } = 10;
+    public int Limit { get; init; } = 100;
 }
 
 public sealed record HealthLiveResponse(string Status, string Service);

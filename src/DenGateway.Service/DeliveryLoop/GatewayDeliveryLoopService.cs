@@ -151,7 +151,7 @@ public sealed class GatewayDeliveryLoopService
         {
             seen++;
             nextCursor = channelEvent.Cursor;
-            var messageResult = await _denChannelsClient.GetChannelMessageAsync(channelEvent.SourceId, cancellationToken);
+            var messageResult = await _denChannelsClient.GetChannelMessageAsync(channelEvent.Cursor, cancellationToken);
             var membershipsResult = await _denChannelsClient.ListMembershipsAsync(channelEvent.ChannelId, cancellationToken);
             if (!membershipsResult.IsAvailable)
             {
@@ -175,9 +175,13 @@ public sealed class GatewayDeliveryLoopService
                     continue;
                 }
 
-                var deliveryMode = WakePolicyToDeliveryMode(membership.WakePolicy);
-                if (deliveryMode is null)
+                var deliveryDecision = ResolveMembershipDeliveryMode(membership, message, channelEvent);
+                if (deliveryDecision.DeliveryMode is null)
                 {
+                    if (deliveryDecision.CountAsSuppressed)
+                    {
+                        suppressed++;
+                    }
                     continue;
                 }
 
@@ -192,11 +196,11 @@ public sealed class GatewayDeliveryLoopService
                     ProjectId: membership.Settings.TryGetValue("projectId", out var memberProjectId) && !string.IsNullOrWhiteSpace(memberProjectId) ? memberProjectId : projectId,
                     TaskId: null,
                     ChannelId: channelEvent.ChannelId,
-                    DeliveryMode: deliveryMode,
+                    DeliveryMode: deliveryDecision.DeliveryMode,
                     Priority: 3,
                     Reason: channelEvent.EventType,
                     ContextSummary: message?.Body ?? $"Channel event {channelEvent.SourceId}",
-                    ContextLink: $"den://channel/{channelEvent.ChannelId}/message/{channelEvent.SourceId}",
+                    ContextLink: $"den://channel/{channelEvent.ChannelId}/message/{channelEvent.Cursor}",
                     MetadataJson: JsonSerializer.Serialize(new Dictionary<string, object?>
                     {
                         ["source"] = "channels",
@@ -245,17 +249,65 @@ public sealed class GatewayDeliveryLoopService
         return int.TryParse(value, out var parsed) ? parsed : null;
     }
 
-    private static string? WakePolicyToDeliveryMode(string wakePolicy)
+    private static DeliveryModeDecision ResolveMembershipDeliveryMode(ChannelMembershipSnapshot membership, ChannelMessageSnapshot? message, ChannelEventSnapshot channelEvent)
     {
-        return wakePolicy.ToLowerInvariant() switch
+        var wakePolicy = membership.WakePolicy.Trim().ToLowerInvariant();
+        if (message is not null && string.Equals(message.SourceKind, "wake_event", StringComparison.OrdinalIgnoreCase))
         {
-            "wake" => "wake",
-            "notify" => "notify",
-            "record_only" => null,
-            "never" => null,
-            _ => null
+            return new DeliveryModeDecision("wake", false);
+        }
+
+        return wakePolicy switch
+        {
+            "wake" => new DeliveryModeDecision("wake", false),
+            "notify" => new DeliveryModeDecision("notify", false),
+            "record_only" => new DeliveryModeDecision(null, false),
+            "never" => new DeliveryModeDecision(null, false),
+            "all_human_messages" => IsHumanMessage(message)
+                ? new DeliveryModeDecision("wake", false)
+                : new DeliveryModeDecision(null, true),
+            "all_messages_except_self" => message is not null && !IsSelfMessage(message, membership.MemberIdentity)
+                ? new DeliveryModeDecision("wake", false)
+                : new DeliveryModeDecision(null, true),
+            "mentions_only" => MentionsMember(message, membership.MemberIdentity)
+                ? new DeliveryModeDecision("wake", false)
+                : new DeliveryModeDecision(null, true),
+            "direct_questions_only" => IsDirectQuestion(message, membership.MemberIdentity)
+                ? new DeliveryModeDecision("wake", false)
+                : new DeliveryModeDecision(null, true),
+            "substantive_digest" => IsHumanMessage(message)
+                ? new DeliveryModeDecision("notify", false)
+                : new DeliveryModeDecision(null, false),
+            _ => new DeliveryModeDecision(null, false)
         };
     }
+
+    private static bool IsHumanMessage(ChannelMessageSnapshot? message)
+    {
+        return message is not null
+            && string.Equals(message.SenderType, "user", StringComparison.OrdinalIgnoreCase)
+            && string.Equals(message.MessageKind, "human_text", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsSelfMessage(ChannelMessageSnapshot message, string memberIdentity)
+    {
+        return string.Equals(message.SenderIdentity, memberIdentity, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool MentionsMember(ChannelMessageSnapshot? message, string memberIdentity)
+    {
+        if (message is null || string.IsNullOrWhiteSpace(message.Body)) return false;
+        var body = message.Body;
+        return body.Contains($"@{memberIdentity}", StringComparison.OrdinalIgnoreCase)
+            || body.Contains($"@{memberIdentity.Replace("_", "-")}", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsDirectQuestion(ChannelMessageSnapshot? message, string memberIdentity)
+    {
+        return MentionsMember(message, memberIdentity) && message!.Body.Contains('?', StringComparison.Ordinal);
+    }
+
+    private readonly record struct DeliveryModeDecision(string? DeliveryMode, bool CountAsSuppressed);
 
     private static string NormalizeMemberType(string memberType)
     {

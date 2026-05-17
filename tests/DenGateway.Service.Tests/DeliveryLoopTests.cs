@@ -135,6 +135,240 @@ public class DeliveryLoopTests
     }
 
     [Fact]
+    public async Task ChannelHumanMessageWithAllHumanMessagesPolicyCreatesWakeDelivery()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot(
+                    Cursor: "101",
+                    EventType: "message_created",
+                    ChannelId: "77",
+                    SourceKind: "channel_message",
+                    SourceId: "101",
+                    DedupeKey: "channel-message:101",
+                    OccurredAt: DateTimeOffset.Parse("2026-05-16T23:06:23Z"))
+            ],
+            MessagesById = new Dictionary<string, ChannelMessageSnapshot>
+            {
+                ["101"] = new ChannelMessageSnapshot(
+                    ChannelMessageId: "101",
+                    ChannelId: "77",
+                    SenderType: "user",
+                    SenderIdentity: "Patch",
+                    MessageKind: "human_text",
+                    Body: "Testing a message",
+                    SourceKind: "wake_event",
+                    SourceId: "direct-agent-message:77:1:1778972783265",
+                    DedupeKey: "channel-message:101",
+                    CreatedAt: DateTimeOffset.Parse("2026-05-16T23:06:23Z"))
+            },
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("77", "agent", "den-channels-runner", "all_human_messages", "active", 60, new Dictionary<string, string>
+                {
+                    ["projectId"] = "den-channels"
+                })
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(Source: "channels", ProjectId: "den-channels", Limit: 10, Now: DateTimeOffset.Parse("2026-05-16T23:07:00Z")));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(1, result.SeenCount);
+        Assert.Equal(1, result.CreatedCount);
+        var row = await ReadSingleDeliveryAsync(databasePath);
+        Assert.Equal("channel_message", row.SourceKind);
+        Assert.Equal("101", row.SourceId);
+        Assert.Equal("agent", row.TargetType);
+        Assert.Equal("den-channels-runner", row.TargetIdentity);
+        Assert.Equal("wake", row.DeliveryMode);
+        Assert.Equal("den-channels", row.ProjectId);
+        Assert.Contains("all_human_messages", row.MetadataJson);
+    }
+
+    [Fact]
+    public async Task ChannelMentionsOnlyPolicyRequiresExplicitMention()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot("201", "message_created", "77", "channel_message", "201", "channel-message:201", DateTimeOffset.Parse("2026-05-16T23:10:00Z")),
+                new ChannelEventSnapshot("202", "message_created", "77", "channel_message", "202", "channel-message:202", DateTimeOffset.Parse("2026-05-16T23:11:00Z"))
+            ],
+            MessagesById = new Dictionary<string, ChannelMessageSnapshot>
+            {
+                ["201"] = new ChannelMessageSnapshot("201", "77", "user", "Patch", "human_text", "hello team", "channel_message", "201", "channel-message:201", DateTimeOffset.Parse("2026-05-16T23:10:00Z")),
+                ["202"] = new ChannelMessageSnapshot("202", "77", "user", "Patch", "human_text", "@den-channels-runner please respond", "channel_message", "202", "channel-message:202", DateTimeOffset.Parse("2026-05-16T23:11:00Z"))
+            },
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("77", "agent", "den-channels-runner", "mentions_only", "active", 60, new Dictionary<string, string> { ["projectId"] = "den-channels" })
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(Source: "channels", ProjectId: "den-channels", Limit: 10, Now: DateTimeOffset.Parse("2026-05-16T23:12:00Z")));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(2, result.SeenCount);
+        Assert.Equal(1, result.CreatedCount);
+        Assert.Equal(1, result.SuppressedCount);
+        var row = await ReadSingleDeliveryAsync(databasePath);
+        Assert.Equal("202", row.SourceId);
+        Assert.Equal("wake", row.DeliveryMode);
+    }
+
+    [Fact]
+    public async Task ChannelAllMessagesExceptSelfSuppressesMatchingSenderIdentity()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot("301", "message_created", "77", "channel_message", "301", "channel-message:301", DateTimeOffset.Parse("2026-05-16T23:13:00Z")),
+                new ChannelEventSnapshot("302", "message_created", "77", "channel_message", "302", "channel-message:302", DateTimeOffset.Parse("2026-05-16T23:14:00Z"))
+            ],
+            MessagesById = new Dictionary<string, ChannelMessageSnapshot>
+            {
+                ["301"] = new ChannelMessageSnapshot("301", "77", "user", "den-channels-runner", "human_text", "self-authored forwarded message", "channel_message", "301", "channel-message:301", DateTimeOffset.Parse("2026-05-16T23:13:00Z")),
+                ["302"] = new ChannelMessageSnapshot("302", "77", "user", "Patch", "human_text", "external human message", "channel_message", "302", "channel-message:302", DateTimeOffset.Parse("2026-05-16T23:14:00Z"))
+            },
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("77", "agent", "den-channels-runner", "all_messages_except_self", "active", 60, new Dictionary<string, string> { ["projectId"] = "den-channels" })
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(Source: "channels", ProjectId: "den-channels", Limit: 10, Now: DateTimeOffset.Parse("2026-05-16T23:15:00Z")));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(2, result.SeenCount);
+        Assert.Equal(1, result.CreatedCount);
+        Assert.Equal(1, result.SuppressedCount);
+        var row = await ReadSingleDeliveryAsync(databasePath);
+        Assert.Equal("302", row.SourceId);
+        Assert.Equal("wake", row.DeliveryMode);
+    }
+
+    [Fact]
+    public async Task ChannelDirectQuestionsOnlyRequiresMentionAndQuestionMark()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot("401", "message_created", "77", "channel_message", "401", "channel-message:401", DateTimeOffset.Parse("2026-05-16T23:16:00Z")),
+                new ChannelEventSnapshot("402", "message_created", "77", "channel_message", "402", "channel-message:402", DateTimeOffset.Parse("2026-05-16T23:17:00Z"))
+            ],
+            MessagesById = new Dictionary<string, ChannelMessageSnapshot>
+            {
+                ["401"] = new ChannelMessageSnapshot("401", "77", "user", "Patch", "human_text", "@den-channels-runner please respond", "channel_message", "401", "channel-message:401", DateTimeOffset.Parse("2026-05-16T23:16:00Z")),
+                ["402"] = new ChannelMessageSnapshot("402", "77", "user", "Patch", "human_text", "@den-channels-runner can you respond?", "channel_message", "402", "channel-message:402", DateTimeOffset.Parse("2026-05-16T23:17:00Z"))
+            },
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("77", "agent", "den-channels-runner", "direct_questions_only", "active", 60, new Dictionary<string, string> { ["projectId"] = "den-channels" })
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(Source: "channels", ProjectId: "den-channels", Limit: 10, Now: DateTimeOffset.Parse("2026-05-16T23:18:00Z")));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(2, result.SeenCount);
+        Assert.Equal(1, result.CreatedCount);
+        Assert.Equal(1, result.SuppressedCount);
+        var row = await ReadSingleDeliveryAsync(databasePath);
+        Assert.Equal("402", row.SourceId);
+        Assert.Equal("wake", row.DeliveryMode);
+    }
+
+    [Fact]
+    public async Task ChannelSubstantiveDigestNotifiesForHumanMessagesOnly()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot("501", "message_created", "77", "channel_message", "501", "channel-message:501", DateTimeOffset.Parse("2026-05-16T23:19:00Z")),
+                new ChannelEventSnapshot("502", "message_created", "77", "channel_message", "502", "channel-message:502", DateTimeOffset.Parse("2026-05-16T23:20:00Z"))
+            ],
+            MessagesById = new Dictionary<string, ChannelMessageSnapshot>
+            {
+                ["501"] = new ChannelMessageSnapshot("501", "77", "agent", "other-agent", "agent_text", "agent chatter", "channel_message", "501", "channel-message:501", DateTimeOffset.Parse("2026-05-16T23:19:00Z")),
+                ["502"] = new ChannelMessageSnapshot("502", "77", "user", "Patch", "human_text", "substantive human update", "channel_message", "502", "channel-message:502", DateTimeOffset.Parse("2026-05-16T23:20:00Z"))
+            },
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("77", "agent", "den-channels-runner", "substantive_digest", "active", 60, new Dictionary<string, string> { ["projectId"] = "den-channels" })
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(Source: "channels", ProjectId: "den-channels", Limit: 10, Now: DateTimeOffset.Parse("2026-05-16T23:21:00Z")));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(2, result.SeenCount);
+        Assert.Equal(1, result.CreatedCount);
+        Assert.Equal(0, result.SuppressedCount);
+        var row = await ReadSingleDeliveryAsync(databasePath);
+        Assert.Equal("502", row.SourceId);
+        Assert.Equal("notify", row.DeliveryMode);
+    }
+
+    [Fact]
+    public async Task ChannelUnknownWakePolicyDefaultsToNoDeliveryWithoutSuppression()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot("601", "message_created", "77", "channel_message", "601", "channel-message:601", DateTimeOffset.Parse("2026-05-16T23:22:00Z"))
+            ],
+            MessagesById = new Dictionary<string, ChannelMessageSnapshot>
+            {
+                ["601"] = new ChannelMessageSnapshot("601", "77", "user", "Patch", "human_text", "hello", "channel_message", "601", "channel-message:601", DateTimeOffset.Parse("2026-05-16T23:22:00Z"))
+            },
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("77", "agent", "den-channels-runner", "future_policy", "active", 60, new Dictionary<string, string> { ["projectId"] = "den-channels" })
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(Source: "channels", ProjectId: "den-channels", Limit: 10, Now: DateTimeOffset.Parse("2026-05-16T23:23:00Z")));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(1, result.SeenCount);
+        Assert.Equal(0, result.CreatedCount);
+        Assert.Equal(0, result.SuppressedCount);
+        Assert.Equal(0, await CountDeliveriesAsync(databasePath));
+    }
+
+    [Fact]
     public async Task UnavailableUpstreamDoesNotCreateDeliveryAndReturnsDegraded()
     {
         var databasePath = CreateTempDatabasePath();
@@ -245,7 +479,7 @@ public class DeliveryLoopTests
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT source_kind, source_id, target_type, target_identity, delivery_mode, status,
-                   dedupe_key, metadata_json, task_id, channel_id, context_summary
+                   dedupe_key, metadata_json, task_id, channel_id, context_summary, project_id
             FROM delivery_requests
             """;
         await using var reader = await command.ExecuteReaderAsync();
@@ -261,12 +495,13 @@ public class DeliveryLoopTests
             reader.GetString(7),
             reader.IsDBNull(8) ? null : reader.GetInt32(8),
             reader.IsDBNull(9) ? null : reader.GetString(9),
-            reader.IsDBNull(10) ? null : reader.GetString(10));
+            reader.IsDBNull(10) ? null : reader.GetString(10),
+            reader.IsDBNull(11) ? null : reader.GetString(11));
         Assert.False(await reader.ReadAsync());
         return row;
     }
 
-    private sealed record DeliveryRow(string SourceKind, string? SourceId, string TargetType, string TargetIdentity, string DeliveryMode, string Status, string DedupeKey, string MetadataJson, int? TaskId, string? ChannelId, string? ContextSummary);
+    private sealed record DeliveryRow(string SourceKind, string? SourceId, string TargetType, string TargetIdentity, string DeliveryMode, string Status, string DedupeKey, string MetadataJson, int? TaskId, string? ChannelId, string? ContextSummary, string? ProjectId);
 
     private sealed class FakeDenCoreClient : IDenCoreClient
     {
@@ -291,8 +526,16 @@ public class DeliveryLoopTests
         public IReadOnlyList<ChannelEventSnapshot> Events { get; init; } = [];
         public IReadOnlyList<ChannelMembershipSnapshot> Memberships { get; init; } = [];
         public ChannelMessageSnapshot? Message { get; init; }
+        public IReadOnlyDictionary<string, ChannelMessageSnapshot> MessagesById { get; init; } = new Dictionary<string, ChannelMessageSnapshot>();
         public Task<ServiceHealthResult> GetHealthAsync(CancellationToken cancellationToken = default) => Task.FromResult(ServiceHealthResult.Available("fake", "ok"));
-        public Task<ClientValueResult<ChannelMessageSnapshot>> GetChannelMessageAsync(string channelMessageId, CancellationToken cancellationToken = default) => Task.FromResult(Message is null ? ClientValueResult<ChannelMessageSnapshot>.Unavailable("not_found", "missing") : ClientValueResult<ChannelMessageSnapshot>.Available(Message));
+        public Task<ClientValueResult<ChannelMessageSnapshot>> GetChannelMessageAsync(string channelMessageId, CancellationToken cancellationToken = default)
+        {
+            if (MessagesById.TryGetValue(channelMessageId, out var message))
+            {
+                return Task.FromResult(ClientValueResult<ChannelMessageSnapshot>.Available(message));
+            }
+            return Task.FromResult(Message is null ? ClientValueResult<ChannelMessageSnapshot>.Unavailable("not_found", "missing") : ClientValueResult<ChannelMessageSnapshot>.Available(Message));
+        }
         public Task<ClientListResult<ChannelMembershipSnapshot>> ListMembershipsAsync(string channelId, CancellationToken cancellationToken = default) => Task.FromResult(ClientListResult<ChannelMembershipSnapshot>.Available(Memberships.Where(m => m.ChannelId == channelId).ToArray()));
         public Task<ClientOperationResult> PostMirrorOrSystemMessageAsync(ChannelMirrorMessage message, CancellationToken cancellationToken = default) => Task.FromResult(ClientOperationResult.Completed("ok"));
         public Task<ClientListResult<ChannelEventSnapshot>> ReadChannelEventsAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default) => Task.FromResult(EventsAvailable ? ClientListResult<ChannelEventSnapshot>.Available(Events.Take(limit).ToArray()) : ClientListResult<ChannelEventSnapshot>.Unavailable("offline", "channels offline"));

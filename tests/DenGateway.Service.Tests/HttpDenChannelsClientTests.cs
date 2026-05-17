@@ -48,7 +48,7 @@ public class HttpDenChannelsClientTests
                         canSend = true,
                         cooldownSeconds = 60,
                         maxAutoRepliesPerWindow = 2,
-                        settingsJsonPreview = "{\"x\":1}"
+                        settingsLabel = "profile den-gateway-runner"
                     }
                 }
             });
@@ -64,7 +64,7 @@ public class HttpDenChannelsClientTests
         Assert.Equal("active", member.Status);
         Assert.Equal("mentions_only", member.WakePolicy);
         Assert.Equal(60, member.CooldownSeconds);
-        Assert.Equal("{\"x\":1}", member.Settings["settingsJsonPreview"]);
+        Assert.Equal("profile den-gateway-runner", member.Settings["settingsLabel"]);
     }
 
     [Fact]

@@ -197,6 +197,7 @@ public sealed class GatewayDeliveryLoopService
 
                 var targetType = NormalizeMemberType(membership.MemberType);
                 var dedupeKey = $"{channelEvent.DedupeKey}:{targetType}:{membership.MemberIdentity}";
+                var cascadeDepth = CalculateCascadeDepth(message);
                 var create = await _database.CreateDeliveryRequestAsync(new DeliveryCreateRequest(
                     SourceKind: channelEvent.SourceKind,
                     SourceId: channelEvent.SourceId,
@@ -220,12 +221,13 @@ public sealed class GatewayDeliveryLoopService
                         ["message_kind"] = message?.MessageKind,
                         ["sender_type"] = message?.SenderType,
                         ["sender_identity"] = message?.SenderIdentity,
-                        ["wake_policy"] = membership.WakePolicy
+                        ["wake_policy"] = membership.WakePolicy,
+                        ["cascade_depth"] = cascadeDepth
                     }, JsonOptions),
                     Status: "pending",
                     SuppressionReason: null,
                     DedupeKey: dedupeKey,
-                    CascadeDepth: 0,
+                    CascadeDepth: cascadeDepth,
                     NextAttemptAt: null,
                     ExpiresAt: null,
                     CreatedAt: now), cancellationToken);
@@ -276,7 +278,7 @@ public sealed class GatewayDeliveryLoopService
             "all_human_messages" => IsHumanMessage(message)
                 ? new DeliveryModeDecision("wake", false)
                 : new DeliveryModeDecision(null, true),
-            "all_messages_except_self" => message is not null && !IsSelfMessage(message, membership.MemberIdentity)
+            "all_messages_except_self" => message is not null && IsHumanMessage(message) && !IsSelfMessage(message, membership.MemberIdentity)
                 ? new DeliveryModeDecision("wake", false)
                 : new DeliveryModeDecision(null, true),
             "mentions_only" => MentionsMember(message, membership.MemberIdentity)
@@ -297,6 +299,19 @@ public sealed class GatewayDeliveryLoopService
         return message is not null
             && string.Equals(message.SenderType, "user", StringComparison.OrdinalIgnoreCase)
             && string.Equals(message.MessageKind, "human_text", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static int CalculateCascadeDepth(ChannelMessageSnapshot? message)
+    {
+        if (message is null)
+        {
+            return 0;
+        }
+
+        return string.Equals(message.SenderType, "agent", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(message.SourceKind, "gateway_delivery", StringComparison.OrdinalIgnoreCase)
+            ? 1
+            : 0;
     }
 
     private static bool IsSelfMessage(ChannelMessageSnapshot message, string memberIdentity)

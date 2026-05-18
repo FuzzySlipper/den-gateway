@@ -265,6 +265,80 @@ public class DeliveryLoopTests
     }
 
     [Fact]
+    public async Task ChannelAllMessagesExceptSelfWakesBothAgentsOnceForHumanMessage()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot("152", "message_created", "12", "channel_message", "152", "channel-message:152", DateTimeOffset.Parse("2026-05-18T09:00:00Z"))
+            ],
+            MessagesById = new Dictionary<string, ChannelMessageSnapshot>
+            {
+                ["152"] = new ChannelMessageSnapshot("152", "12", "user", "Patch", "human_text", "please both take a look", "channel_message", "152", "channel-message:152", DateTimeOffset.Parse("2026-05-18T09:00:00Z"))
+            },
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("12", "agent", "quillforge-planner", "all_messages_except_self", "active", 60, new Dictionary<string, string> { ["projectId"] = "quillforge" }),
+                new ChannelMembershipSnapshot("12", "agent", "quillforge-runner", "all_messages_except_self", "active", 60, new Dictionary<string, string> { ["projectId"] = "quillforge" })
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(Source: "channels", ProjectId: "quillforge", Limit: 10, Now: DateTimeOffset.Parse("2026-05-18T09:01:00Z")));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(1, result.SeenCount);
+        Assert.Equal(2, result.CreatedCount);
+        Assert.Equal(0, result.SuppressedCount);
+        var rows = await ReadDeliveriesAsync(databasePath);
+        Assert.Equal(["quillforge-planner", "quillforge-runner"], rows.Select(row => row.TargetIdentity).OrderBy(identity => identity).ToArray());
+        Assert.All(rows, row =>
+        {
+            Assert.Equal("wake", row.DeliveryMode);
+            Assert.Contains("\"cascade_depth\":0", row.MetadataJson);
+        });
+    }
+
+    [Fact]
+    public async Task ChannelAllMessagesExceptSelfSuppressesPeerAgentGatewayDeliveryReplies()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot("154", "message_created", "12", "channel_message", "154", "channel-message:154", DateTimeOffset.Parse("2026-05-18T09:02:00Z")),
+                new ChannelEventSnapshot("155", "message_created", "12", "channel_message", "155", "channel-message:155", DateTimeOffset.Parse("2026-05-18T09:02:02Z"))
+            ],
+            MessagesById = new Dictionary<string, ChannelMessageSnapshot>
+            {
+                ["154"] = new ChannelMessageSnapshot("154", "12", "agent", "quillforge-runner", "agent_text", "I'll inspect that now", "gateway_delivery", "90", "gateway-delivery:90:interim", DateTimeOffset.Parse("2026-05-18T09:02:00Z")),
+                ["155"] = new ChannelMessageSnapshot("155", "12", "agent", "quillforge-runner", "agent_text", "Done, nothing else to add", "gateway_delivery", "90", "gateway-delivery:90:final", DateTimeOffset.Parse("2026-05-18T09:02:02Z"))
+            },
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("12", "agent", "quillforge-planner", "all_messages_except_self", "active", 60, new Dictionary<string, string> { ["projectId"] = "quillforge" }),
+                new ChannelMembershipSnapshot("12", "agent", "quillforge-runner", "all_messages_except_self", "active", 60, new Dictionary<string, string> { ["projectId"] = "quillforge" })
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(Source: "channels", ProjectId: "quillforge", Limit: 10, Now: DateTimeOffset.Parse("2026-05-18T09:03:00Z")));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(2, result.SeenCount);
+        Assert.Equal(0, result.CreatedCount);
+        Assert.Equal(4, result.SuppressedCount);
+        Assert.Equal(0, await CountDeliveriesAsync(databasePath));
+    }
+
+    [Fact]
     public async Task ChannelDirectQuestionsOnlyRequiresMentionAndQuestionMark()
     {
         var databasePath = CreateTempDatabasePath();
@@ -500,6 +574,13 @@ public class DeliveryLoopTests
 
     private static async Task<DeliveryRow> ReadSingleDeliveryAsync(string databasePath)
     {
+        var rows = await ReadDeliveriesAsync(databasePath);
+        var row = Assert.Single(rows);
+        return row;
+    }
+
+    private static async Task<IReadOnlyList<DeliveryRow>> ReadDeliveriesAsync(string databasePath)
+    {
         await using var connection = new SqliteConnection($"Data Source={databasePath}");
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
@@ -507,24 +588,28 @@ public class DeliveryLoopTests
             SELECT source_kind, source_id, target_type, target_identity, delivery_mode, status,
                    dedupe_key, metadata_json, task_id, channel_id, context_summary, project_id
             FROM delivery_requests
+            ORDER BY id
             """;
         await using var reader = await command.ExecuteReaderAsync();
-        Assert.True(await reader.ReadAsync());
-        var row = new DeliveryRow(
-            reader.GetString(0),
-            reader.IsDBNull(1) ? null : reader.GetString(1),
-            reader.GetString(2),
-            reader.GetString(3),
-            reader.GetString(4),
-            reader.GetString(5),
-            reader.GetString(6),
-            reader.GetString(7),
-            reader.IsDBNull(8) ? null : reader.GetInt32(8),
-            reader.IsDBNull(9) ? null : reader.GetString(9),
-            reader.IsDBNull(10) ? null : reader.GetString(10),
-            reader.IsDBNull(11) ? null : reader.GetString(11));
-        Assert.False(await reader.ReadAsync());
-        return row;
+        var rows = new List<DeliveryRow>();
+        while (await reader.ReadAsync())
+        {
+            rows.Add(new DeliveryRow(
+                reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5),
+                reader.GetString(6),
+                reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetInt32(8),
+                reader.IsDBNull(9) ? null : reader.GetString(9),
+                reader.IsDBNull(10) ? null : reader.GetString(10),
+                reader.IsDBNull(11) ? null : reader.GetString(11)));
+        }
+
+        return rows;
     }
 
     private sealed record DeliveryRow(string SourceKind, string? SourceId, string TargetType, string TargetIdentity, string DeliveryMode, string Status, string DedupeKey, string MetadataJson, int? TaskId, string? ChannelId, string? ContextSummary, string? ProjectId);

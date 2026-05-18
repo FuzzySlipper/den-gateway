@@ -34,6 +34,42 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
             : ServiceHealthResult.Unavailable("http", "not_ready", $"{dto.Service} reported {dto.Status}.");
     }
 
+    public async Task<ClientValueResult<ChannelMembershipListSnapshot>> ListProjectMembershipsAsync(string projectId, CancellationToken cancellationToken = default)
+    {
+        var response = await _httpClient.GetAsync($"/api/gateway/memberships?projectId={Uri.EscapeDataString(projectId)}", cancellationToken);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            return ClientValueResult<ChannelMembershipListSnapshot>.Unavailable("not_found", $"Project {projectId} has no default Den Channels membership surface.");
+        }
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return ClientValueResult<ChannelMembershipListSnapshot>.Unavailable($"http_{(int)response.StatusCode}", "Den Channels project membership lookup failed.");
+        }
+
+        var dto = await response.Content.ReadFromJsonAsync<GatewayMembershipsDto>(JsonOptions, cancellationToken);
+        if (dto is null)
+        {
+            return ClientValueResult<ChannelMembershipListSnapshot>.Unavailable("invalid_response", "Den Channels project membership lookup returned an empty or invalid response.");
+        }
+
+        var members = dto.Members.Select(member => new ChannelMembershipSnapshot(
+            ChannelId: dto.ChannelId.ToString(),
+            MemberType: member.MemberType,
+            MemberIdentity: member.MemberIdentity,
+            WakePolicy: member.WakePolicy,
+            Status: member.MembershipStatus,
+            CooldownSeconds: member.CooldownSeconds,
+            Settings: ToSettings(dto, member))).ToArray();
+
+        return ClientValueResult<ChannelMembershipListSnapshot>.Available(new ChannelMembershipListSnapshot(
+            ChannelId: dto.ChannelId.ToString(),
+            ChannelSlug: dto.ChannelSlug,
+            ChannelKind: dto.ChannelKind,
+            ProjectId: dto.ProjectId,
+            Members: members));
+    }
+
     public async Task<ClientValueResult<ChannelMessageSnapshot>> GetChannelMessageAsync(string channelMessageId, CancellationToken cancellationToken = default)
     {
         var response = await _httpClient.GetAsync($"/api/gateway/messages/{Uri.EscapeDataString(channelMessageId)}", cancellationToken);
@@ -130,17 +166,56 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
             return ClientListResult<ChannelEventSnapshot>.Unavailable("invalid_response", "Den Channels event cursor returned an empty or invalid response.");
         }
 
-        var items = dto.Items.Select(item => new ChannelEventSnapshot(
-            Cursor: item.Id.ToString(),
-            EventType: item.MessageKind,
-            ChannelId: item.ChannelId.ToString(),
-            SourceKind: item.SourceKind ?? "channel_message",
-            SourceId: item.SourceId ?? item.Id.ToString(),
-            DedupeKey: item.DedupeKey ?? $"channel-message:{item.Id}",
-            OccurredAt: ParseDateTimeOffset(item.CreatedAt))).ToArray();
+        var items = dto.Items.Select(ToSnapshot).ToArray();
 
         return ClientListResult<ChannelEventSnapshot>.Available(items);
     }
+
+    public async Task<ClientValueResult<string>> GetLatestChannelEventCursorAsync(string projectId, CancellationToken cancellationToken = default)
+    {
+        const int pageSize = 200;
+        long? afterId = 0;
+        string? latest = null;
+        while (true)
+        {
+            var query = $"projectId={Uri.EscapeDataString(projectId)}&afterId={afterId}&limit={pageSize}";
+            var response = await _httpClient.GetAsync($"/api/gateway/events?{query}", cancellationToken);
+            if (!response.IsSuccessStatusCode)
+            {
+                return ClientValueResult<string>.Unavailable($"http_{(int)response.StatusCode}", "Den Channels latest event cursor read failed.");
+            }
+
+            var dto = await response.Content.ReadFromJsonAsync<GatewayEventsDto>(JsonOptions, cancellationToken);
+            if (dto is null)
+            {
+                return ClientValueResult<string>.Unavailable("invalid_response", "Den Channels latest event cursor returned an empty or invalid response.");
+            }
+
+            if (dto.Items.Count == 0)
+            {
+                return latest is null
+                    ? ClientValueResult<string>.Unavailable("empty_cursor", $"Project {projectId} has no channel events to seed from.")
+                    : ClientValueResult<string>.Available(latest);
+            }
+
+            latest = dto.Items[^1].Id.ToString();
+            if (!dto.HasMore || dto.NextAfterId is null)
+            {
+                return ClientValueResult<string>.Available(latest);
+            }
+
+            afterId = dto.NextAfterId;
+        }
+    }
+
+    private static ChannelEventSnapshot ToSnapshot(GatewayEventItemDto item) => new(
+        Cursor: item.Id.ToString(),
+        EventType: item.MessageKind,
+        ChannelId: item.ChannelId.ToString(),
+        SourceKind: item.SourceKind ?? "channel_message",
+        SourceId: item.SourceId ?? item.Id.ToString(),
+        DedupeKey: item.DedupeKey ?? $"channel-message:{item.Id}",
+        OccurredAt: ParseDateTimeOffset(item.CreatedAt));
 
     private static IReadOnlyDictionary<string, string> ToSettings(GatewayMembershipsDto dto, GatewayMemberDto member)
     {

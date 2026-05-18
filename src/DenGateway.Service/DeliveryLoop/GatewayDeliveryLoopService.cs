@@ -35,7 +35,7 @@ public sealed class GatewayDeliveryLoopService
 
         if (source is "all" or "channels")
         {
-            var channels = await PollChannelsOnceAsync(request.ProjectId, limit, now, cancellationToken);
+            var channels = await PollChannelsOnceAsync(request.ProjectId, limit, now, request.SeedCursorAtLatestWhenMissing, cancellationToken);
             aggregate.Add(channels);
         }
 
@@ -133,9 +133,19 @@ public sealed class GatewayDeliveryLoopService
         return new GatewayDeliveryPollResult("completed", seen, created, duplicates, suppressed, nextCursor, null, null);
     }
 
-    private async Task<GatewayDeliveryPollResult> PollChannelsOnceAsync(string? projectId, int limit, DateTimeOffset now, CancellationToken cancellationToken)
+    private async Task<GatewayDeliveryPollResult> PollChannelsOnceAsync(string? projectId, int limit, DateTimeOffset now, bool seedCursorAtLatestWhenMissing, CancellationToken cancellationToken)
     {
         var after = await _database.ReadDeliveryLoopCursorAsync("channels", projectId, cancellationToken);
+        if (!string.IsNullOrWhiteSpace(projectId) && string.IsNullOrWhiteSpace(after) && seedCursorAtLatestWhenMissing)
+        {
+            var seed = await _denChannelsClient.GetLatestChannelEventCursorAsync(projectId, cancellationToken);
+            if (seed.IsAvailable && !string.IsNullOrWhiteSpace(seed.Value))
+            {
+                await _database.UpsertDeliveryLoopCursorAsync("channels", projectId, seed.Value, now, cancellationToken);
+                return new GatewayDeliveryPollResult("completed", 0, 0, 0, 0, seed.Value, null, "seeded_new_project_cursor_at_latest");
+            }
+        }
+
         var events = await _denChannelsClient.ReadChannelEventsAsync(after: after, projectId: projectId, limit: limit, cancellationToken);
         if (!events.IsAvailable)
         {
@@ -356,7 +366,8 @@ public sealed record GatewayDeliveryPollRequest(
     [property: JsonPropertyName("source")] string? Source,
     [property: JsonPropertyName("project_id")] string? ProjectId,
     [property: JsonPropertyName("limit")] int Limit,
-    [property: JsonPropertyName("now")] DateTimeOffset? Now = null);
+    [property: JsonPropertyName("now")] DateTimeOffset? Now = null,
+    [property: JsonPropertyName("seed_cursor_at_latest_when_missing")] bool SeedCursorAtLatestWhenMissing = false);
 
 public sealed record GatewayDeliveryPollResult(
     [property: JsonPropertyName("status")] string Status,

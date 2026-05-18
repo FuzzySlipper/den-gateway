@@ -37,6 +37,31 @@ public sealed class HttpDenCoreClient : IDenCoreClient
             : ServiceHealthResult.Unavailable("http", "not_ready", $"{dto.Service ?? "den-core"} reported {dto.Status ?? "unknown"}.");
     }
 
+    public async Task<ClientListResult<DenProjectSnapshot>> ListProjectsAsync(CancellationToken cancellationToken = default)
+    {
+        var response = await _httpClient.GetAsync("api/projects", cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            return ClientListResult<DenProjectSnapshot>.Unavailable($"http_{(int)response.StatusCode}", "Den Core projects list failed.");
+        }
+
+        var dto = await response.Content.ReadFromJsonAsync<IReadOnlyList<ProjectDto>>(JsonOptions, cancellationToken);
+        if (dto is null)
+        {
+            return ClientListResult<DenProjectSnapshot>.Unavailable("invalid_response", "Den Core projects list returned an empty or invalid response.");
+        }
+
+        var projects = dto
+            .Where(project => !string.IsNullOrWhiteSpace(project.Id))
+            .Select(project => new DenProjectSnapshot(
+                ProjectId: project.Id,
+                Name: project.Name ?? project.Id,
+                Kind: project.Kind ?? "project",
+                Visibility: project.Visibility ?? "normal"))
+            .ToArray();
+        return ClientListResult<DenProjectSnapshot>.Available(projects);
+    }
+
     public async Task<ClientListResult<GatewayBindingSnapshot>> ListActiveBindingsAsync(CancellationToken cancellationToken = default)
     {
         var response = await _httpClient.GetAsync("api/gateway/bindings?status=active%2Cdegraded", cancellationToken);
@@ -236,6 +261,12 @@ public sealed class HttpDenCoreClient : IDenCoreClient
         [property: JsonPropertyName("service")] string? Service,
         [property: JsonPropertyName("checked_at")] string? CheckedAt,
         [property: JsonPropertyName("checks")] JsonElement? Checks);
+
+    private sealed record ProjectDto(
+        [property: JsonPropertyName("id")] string Id,
+        [property: JsonPropertyName("name")] string? Name,
+        [property: JsonPropertyName("kind")] string? Kind,
+        [property: JsonPropertyName("visibility")] string? Visibility);
 
     private sealed record GatewayBindingsDto(
         [property: JsonPropertyName("items")] IReadOnlyList<GatewayBindingDto>? Items,

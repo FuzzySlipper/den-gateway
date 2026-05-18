@@ -118,6 +118,7 @@ public class BindingSnapshotTests
         public IReadOnlyList<GatewayBindingSnapshot> Bindings { get; init; } = [];
         public List<GatewayReconciliationEvent> PostedEvents { get; } = [];
         public Task<ServiceHealthResult> GetHealthAsync(CancellationToken cancellationToken = default) => Task.FromResult(ServiceHealthResult.Available("fake", "ok"));
+        public Task<ClientListResult<DenProjectSnapshot>> ListProjectsAsync(CancellationToken cancellationToken = default) => Task.FromResult(ClientListResult<DenProjectSnapshot>.Available([]));
         public Task<ClientListResult<GatewayBindingSnapshot>> ListActiveBindingsAsync(CancellationToken cancellationToken = default) => Task.FromResult(ClientListResult<GatewayBindingSnapshot>.Available(Bindings));
         public Task<ClientValueResult<SourceSummary>> GetSourceSummaryAsync(string sourceKind, string sourceId, string? projectId, CancellationToken cancellationToken = default) => Task.FromResult(ClientValueResult<SourceSummary>.Unavailable("not_found", "missing"));
         public Task<ClientListResult<GatewayOutboxEvent>> ReadEventOutboxAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default) => Task.FromResult(ClientListResult<GatewayOutboxEvent>.Available([]));

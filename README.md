@@ -50,6 +50,15 @@ Configuration lives under the `DenGateway` section.
       "DownFailureThreshold": 4,
       "StableSuccessThreshold": 4,
       "BindingTtlMinutes": 120
+    },
+    "DeliveryLoop": {
+      "Enabled": true,
+      "Source": "all",
+      "DiscoverProjects": true,
+      "ExcludedProjectIds": ["noisy-experimental-project"],
+      "SeedNewProjectCursorsAtLatest": true,
+      "PollIntervalSeconds": 10,
+      "Limit": 100
     }
   }
 }
@@ -64,9 +73,15 @@ DenGateway__DenCore__UseStub=false
 DenGateway__DenChannels__BaseUrl=http://192.168.1.10:18080
 DenGateway__DenChannels__UseStub=true
 DenGateway__Sentinel__SentinelId=den-k8-sentinel-1
+DenGateway__DeliveryLoop__Enabled=true
+DenGateway__DeliveryLoop__Source=all
+DenGateway__DeliveryLoop__DiscoverProjects=true
+DenGateway__DeliveryLoop__SeedNewProjectCursorsAtLatest=true
 ```
 
 `UseStub=true` remains useful for isolated local tests. Production now runs Den Core and Den Channels in HTTP mode via the Den Channels/Core service endpoints.
+
+The delivery loop's intended operator path is project discovery, not manual `ProjectIds` maintenance. With `DiscoverProjects=true`, Gateway asks Den Core for normal project records, checks each project's default Den Channels lane through `/api/gateway/memberships?projectId=...`, and polls projects that have a `project_default` channel plus at least one active wake-relevant agent membership. Use `ExcludedProjectIds` only for explicit opt-outs such as archived, noisy, or experimental projects. Keep `SeedNewProjectCursorsAtLatest=true` for normal rollout so newly discovered projects start from the latest Channels event instead of replaying old channel traffic; set it false only when intentional backfill is desired.
 
 ## Build and test
 

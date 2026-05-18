@@ -410,6 +410,32 @@ public class DeliveryLoopTests
     }
 
     [Fact]
+    public async Task NewProjectCursorCanSeedAtLatestWithoutReplayingBackfill()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            LatestCursor = "999",
+            Events =
+            [
+                new ChannelEventSnapshot("900", "message_created", "77", "channel_message", "900", "channel-message:900", DateTimeOffset.Parse("2026-05-17T09:00:00Z"))
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest("channels", "den-network", 10, DateTimeOffset.Parse("2026-05-17T09:05:00Z"), SeedCursorAtLatestWhenMissing: true));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(0, result.SeenCount);
+        Assert.Equal("999", result.NextCursor);
+        Assert.Equal(0, channels.ReadEventsCalls);
+        Assert.Equal("999", await database.ReadDeliveryLoopCursorAsync("channels", "den-network"));
+        Assert.Equal(0, await CountDeliveriesAsync(databasePath));
+    }
+
+    [Fact]
     public async Task PollEndpointRunsDeliveryLoopAndReturnsCounts()
     {
         var databasePath = CreateTempDatabasePath();
@@ -509,6 +535,7 @@ public class DeliveryLoopTests
         public IReadOnlyList<GatewayOutboxEvent> OutboxEvents { get; init; } = [];
         public SourceSummary? SourceSummary { get; init; }
         public Task<ServiceHealthResult> GetHealthAsync(CancellationToken cancellationToken = default) => Task.FromResult(ServiceHealthResult.Available("fake", "ok"));
+        public Task<ClientListResult<DenProjectSnapshot>> ListProjectsAsync(CancellationToken cancellationToken = default) => Task.FromResult(ClientListResult<DenProjectSnapshot>.Available([]));
         public Task<ClientListResult<GatewayBindingSnapshot>> ListActiveBindingsAsync(CancellationToken cancellationToken = default) => Task.FromResult(ClientListResult<GatewayBindingSnapshot>.Available([]));
         public Task<ClientValueResult<SourceSummary>> GetSourceSummaryAsync(string sourceKind, string sourceId, string? projectId, CancellationToken cancellationToken = default)
         {
@@ -527,7 +554,10 @@ public class DeliveryLoopTests
         public IReadOnlyList<ChannelMembershipSnapshot> Memberships { get; init; } = [];
         public ChannelMessageSnapshot? Message { get; init; }
         public IReadOnlyDictionary<string, ChannelMessageSnapshot> MessagesById { get; init; } = new Dictionary<string, ChannelMessageSnapshot>();
+        public string? LatestCursor { get; init; }
+        public int ReadEventsCalls { get; private set; }
         public Task<ServiceHealthResult> GetHealthAsync(CancellationToken cancellationToken = default) => Task.FromResult(ServiceHealthResult.Available("fake", "ok"));
+        public Task<ClientValueResult<ChannelMembershipListSnapshot>> ListProjectMembershipsAsync(string projectId, CancellationToken cancellationToken = default) => Task.FromResult(ClientValueResult<ChannelMembershipListSnapshot>.Unavailable("not_found", "missing"));
         public Task<ClientValueResult<ChannelMessageSnapshot>> GetChannelMessageAsync(string channelMessageId, CancellationToken cancellationToken = default)
         {
             if (MessagesById.TryGetValue(channelMessageId, out var message))
@@ -538,6 +568,11 @@ public class DeliveryLoopTests
         }
         public Task<ClientListResult<ChannelMembershipSnapshot>> ListMembershipsAsync(string channelId, CancellationToken cancellationToken = default) => Task.FromResult(ClientListResult<ChannelMembershipSnapshot>.Available(Memberships.Where(m => m.ChannelId == channelId).ToArray()));
         public Task<ClientOperationResult> PostMirrorOrSystemMessageAsync(ChannelMirrorMessage message, CancellationToken cancellationToken = default) => Task.FromResult(ClientOperationResult.Completed("ok"));
-        public Task<ClientListResult<ChannelEventSnapshot>> ReadChannelEventsAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default) => Task.FromResult(EventsAvailable ? ClientListResult<ChannelEventSnapshot>.Available(Events.Take(limit).ToArray()) : ClientListResult<ChannelEventSnapshot>.Unavailable("offline", "channels offline"));
+        public Task<ClientListResult<ChannelEventSnapshot>> ReadChannelEventsAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default)
+        {
+            ReadEventsCalls++;
+            return Task.FromResult(EventsAvailable ? ClientListResult<ChannelEventSnapshot>.Available(Events.Take(limit).ToArray()) : ClientListResult<ChannelEventSnapshot>.Unavailable("offline", "channels offline"));
+        }
+        public Task<ClientValueResult<string>> GetLatestChannelEventCursorAsync(string projectId, CancellationToken cancellationToken = default) => Task.FromResult(LatestCursor is null ? ClientValueResult<string>.Unavailable("empty_cursor", "no events") : ClientValueResult<string>.Available(LatestCursor));
     }
 }

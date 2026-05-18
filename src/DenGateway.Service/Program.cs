@@ -18,6 +18,7 @@ builder.Services.AddSingleton(sp => new GatewayDatabase(sp.GetRequiredService<IO
 builder.Services.AddSingleton(sp => new BindingSnapshotSettings(sp.GetRequiredService<IOptions<DenGatewayOptions>>().Value.Sentinel.BindingTtlMinutes));
 builder.Services.AddSingleton<BindingSnapshotService>();
 builder.Services.AddSingleton<GatewayDeliveryLoopService>();
+builder.Services.AddSingleton<GatewayChannelProjectDiscoveryService>();
 builder.Services.AddHostedService<GatewayDeliveryLoopHostedService>();
 
 if (configuredOptions.DenCore.UseStub)
@@ -252,6 +253,9 @@ public sealed class DeliveryLoopOptions
     public string Source { get; init; } = "all";
     public string? ProjectId { get; init; }
     public string[] ProjectIds { get; init; } = [];
+    public bool DiscoverProjects { get; init; } = true;
+    public string[] ExcludedProjectIds { get; init; } = [];
+    public bool SeedNewProjectCursorsAtLatest { get; init; } = true;
     public int PollIntervalSeconds { get; init; } = 10;
     public int Limit { get; init; } = 100;
 }

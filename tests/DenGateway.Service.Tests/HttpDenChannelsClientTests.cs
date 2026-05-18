@@ -68,6 +68,51 @@ public class HttpDenChannelsClientTests
     }
 
     [Fact]
+    public async Task ListProjectMembershipsAsyncMapsDefaultProjectSurface()
+    {
+        var client = NewClient((request, _) =>
+        {
+            Assert.Equal("/api/gateway/memberships", request.RequestUri!.AbsolutePath);
+            Assert.Equal("projectId=den-network", request.RequestUri.Query.TrimStart('?'));
+            return Json(new
+            {
+                channelId = 8,
+                channelSlug = "project-den-network",
+                channelKind = "project_default",
+                projectId = "den-network",
+                members = new[]
+                {
+                    new
+                    {
+                        id = 1,
+                        memberType = "agent",
+                        memberIdentity = "sysadmin",
+                        membershipStatus = "active",
+                        wakePolicy = "all_human_messages",
+                        canSend = true,
+                        cooldownSeconds = 60,
+                        maxAutoRepliesPerWindow = 2,
+                        settingsLabel = "sysadmin lane"
+                    }
+                }
+            });
+        });
+
+        var memberships = await client.ListProjectMembershipsAsync("den-network");
+
+        Assert.True(memberships.IsAvailable);
+        Assert.NotNull(memberships.Value);
+        Assert.Equal("8", memberships.Value.ChannelId);
+        Assert.Equal("project-den-network", memberships.Value.ChannelSlug);
+        Assert.Equal("project_default", memberships.Value.ChannelKind);
+        Assert.Equal("den-network", memberships.Value.ProjectId);
+        var member = Assert.Single(memberships.Value.Members);
+        Assert.Equal("sysadmin", member.MemberIdentity);
+        Assert.Equal("all_human_messages", member.WakePolicy);
+        Assert.Equal("sysadmin lane", member.Settings["settingsLabel"]);
+    }
+
+    [Fact]
     public async Task GetChannelMessageAsyncMapsMessageSnapshot()
     {
         var client = NewClient((request, _) =>
@@ -144,6 +189,48 @@ public class HttpDenChannelsClientTests
         Assert.Equal("channel_message", item.SourceKind);
         Assert.Equal("event:11", item.DedupeKey);
         Assert.Equal(DateTimeOffset.Parse("2026-05-13T07:00:00Z"), item.OccurredAt);
+    }
+
+    [Fact]
+    public async Task GetLatestChannelEventCursorAsyncWalksPagesToLatestCursor()
+    {
+        var calls = 0;
+        var client = NewClient((request, _) =>
+        {
+            calls++;
+            Assert.Equal("/api/gateway/events", request.RequestUri!.AbsolutePath);
+            if (calls == 1)
+            {
+                Assert.Equal("projectId=den-network&afterId=0&limit=200", request.RequestUri.Query.TrimStart('?'));
+                return Json(new
+                {
+                    items = new[]
+                    {
+                        new { id = 10, channelId = 8, messageKind = "human_text", sourceKind = "channel_message", sourceId = "10", dedupeKey = "event:10", createdAt = "2026-05-13T07:00:00Z" }
+                    },
+                    nextAfterId = 10,
+                    hasMore = true
+                });
+            }
+
+            Assert.Equal("projectId=den-network&afterId=10&limit=200", request.RequestUri.Query.TrimStart('?'));
+            return Json(new
+            {
+                items = new[]
+                {
+                    new { id = 11, channelId = 8, messageKind = "human_text", sourceKind = "channel_message", sourceId = "11", dedupeKey = "event:11", createdAt = "2026-05-13T07:01:00Z" },
+                    new { id = 12, channelId = 8, messageKind = "human_text", sourceKind = "channel_message", sourceId = "12", dedupeKey = "event:12", createdAt = "2026-05-13T07:02:00Z" }
+                },
+                nextAfterId = 12,
+                hasMore = false
+            });
+        });
+
+        var result = await client.GetLatestChannelEventCursorAsync("den-network");
+
+        Assert.True(result.IsAvailable);
+        Assert.Equal("12", result.Value);
+        Assert.Equal(2, calls);
     }
 
     [Fact]

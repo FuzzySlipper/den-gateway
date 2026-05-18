@@ -3,6 +3,7 @@ namespace DenGateway.Service.Clients;
 public interface IDenCoreClient
 {
     Task<ServiceHealthResult> GetHealthAsync(CancellationToken cancellationToken = default);
+    Task<ClientListResult<DenProjectSnapshot>> ListProjectsAsync(CancellationToken cancellationToken = default);
     Task<ClientListResult<GatewayBindingSnapshot>> ListActiveBindingsAsync(CancellationToken cancellationToken = default);
     Task<ClientValueResult<SourceSummary>> GetSourceSummaryAsync(string sourceKind, string sourceId, string? projectId, CancellationToken cancellationToken = default);
     Task<ClientListResult<GatewayOutboxEvent>> ReadEventOutboxAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default);
@@ -12,10 +13,12 @@ public interface IDenCoreClient
 public interface IDenChannelsClient
 {
     Task<ServiceHealthResult> GetHealthAsync(CancellationToken cancellationToken = default);
+    Task<ClientValueResult<ChannelMembershipListSnapshot>> ListProjectMembershipsAsync(string projectId, CancellationToken cancellationToken = default);
     Task<ClientValueResult<ChannelMessageSnapshot>> GetChannelMessageAsync(string channelMessageId, CancellationToken cancellationToken = default);
     Task<ClientListResult<ChannelMembershipSnapshot>> ListMembershipsAsync(string channelId, CancellationToken cancellationToken = default);
     Task<ClientOperationResult> PostMirrorOrSystemMessageAsync(ChannelMirrorMessage message, CancellationToken cancellationToken = default);
     Task<ClientListResult<ChannelEventSnapshot>> ReadChannelEventsAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default);
+    Task<ClientValueResult<string>> GetLatestChannelEventCursorAsync(string projectId, CancellationToken cancellationToken = default);
 }
 
 public sealed class StubDenCoreClient : IDenCoreClient
@@ -30,6 +33,11 @@ public sealed class StubDenCoreClient : IDenCoreClient
     public Task<ServiceHealthResult> GetHealthAsync(CancellationToken cancellationToken = default)
     {
         return Task.FromResult(ServiceHealthResult.Available("stub", "Den Core stub is configured."));
+    }
+
+    public Task<ClientListResult<DenProjectSnapshot>> ListProjectsAsync(CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(ClientListResult<DenProjectSnapshot>.Available([]));
     }
 
     public Task<ClientListResult<GatewayBindingSnapshot>> ListActiveBindingsAsync(CancellationToken cancellationToken = default)
@@ -74,6 +82,13 @@ public sealed class StubDenChannelsClient : IDenChannelsClient
         return Task.FromResult(ServiceHealthResult.Available("stub", "Den Channels stub is configured."));
     }
 
+    public Task<ClientValueResult<ChannelMembershipListSnapshot>> ListProjectMembershipsAsync(string projectId, CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(ClientValueResult<ChannelMembershipListSnapshot>.Unavailable(
+            "not_implemented",
+            "Project membership discovery is unavailable in stub mode; pass explicit simulation payloads for v1 tests."));
+    }
+
     public Task<ClientValueResult<ChannelMessageSnapshot>> GetChannelMessageAsync(string channelMessageId, CancellationToken cancellationToken = default)
     {
         return Task.FromResult(ClientValueResult<ChannelMessageSnapshot>.Unavailable(
@@ -99,6 +114,13 @@ public sealed class StubDenChannelsClient : IDenChannelsClient
         return Task.FromResult(ClientListResult<ChannelEventSnapshot>.Unavailable(
             "not_implemented",
             "Den Channels event cursor for Gateway wake policy is not implemented yet; use explicit simulation payloads."));
+    }
+
+    public Task<ClientValueResult<string>> GetLatestChannelEventCursorAsync(string projectId, CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(ClientValueResult<string>.Unavailable(
+            "not_implemented",
+            "Den Channels latest event cursor discovery is unavailable in stub mode."));
     }
 }
 
@@ -137,6 +159,12 @@ public sealed record GatewayBindingSnapshot(
     DateTimeOffset? LastSeenAt,
     DateTimeOffset? ExpiresAt,
     IReadOnlyDictionary<string, string> Metadata);
+
+public sealed record DenProjectSnapshot(
+    string ProjectId,
+    string Name,
+    string Kind,
+    string Visibility);
 
 public sealed record SourceSummary(
     string SourceKind,
@@ -190,6 +218,13 @@ public sealed record ChannelMembershipSnapshot(
     string Status,
     int? CooldownSeconds,
     IReadOnlyDictionary<string, string> Settings);
+
+public sealed record ChannelMembershipListSnapshot(
+    string ChannelId,
+    string ChannelSlug,
+    string ChannelKind,
+    string? ProjectId,
+    IReadOnlyList<ChannelMembershipSnapshot> Members);
 
 public sealed record ChannelMirrorMessage(
     string ChannelId,

@@ -7,6 +7,38 @@ namespace DenGateway.Service.Tests;
 public class HttpDenCoreClientTests
 {
     [Fact]
+    public async Task ListProjectsAsyncMapsCoreProjectList()
+    {
+        using var client = new HttpClient(new JsonHandler("""
+            [
+              {"id":"den-network","name":"Den Network","kind":"project","visibility":"normal"},
+              {"id":"old-space","name":"Old Space","kind":"project","visibility":"archived"}
+            ]
+            """))
+        {
+            BaseAddress = new Uri("http://den-core.test/")
+        };
+        var core = new HttpDenCoreClient(client);
+
+        var result = await core.ListProjectsAsync();
+
+        Assert.True(result.IsAvailable);
+        Assert.Collection(result.Items,
+            project =>
+            {
+                Assert.Equal("den-network", project.ProjectId);
+                Assert.Equal("Den Network", project.Name);
+                Assert.Equal("project", project.Kind);
+                Assert.Equal("normal", project.Visibility);
+            },
+            project =>
+            {
+                Assert.Equal("old-space", project.ProjectId);
+                Assert.Equal("archived", project.Visibility);
+            });
+    }
+
+    [Fact]
     public async Task ListActiveBindingsReadsCoreGatewayItemsProjection()
     {
         using var client = new HttpClient(new JsonHandler("""

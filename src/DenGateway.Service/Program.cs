@@ -264,6 +264,7 @@ public sealed class DeliveryLoopOptions
     public string Source { get; init; } = "all";
     public string? ProjectId { get; init; }
     public string[] ProjectIds { get; init; } = [];
+    public string[] ChannelIds { get; init; } = [];
     public bool DiscoverProjects { get; init; } = true;
     public string[] ExcludedProjectIds { get; init; } = [];
     public bool SeedNewProjectCursorsAtLatest { get; init; } = true;

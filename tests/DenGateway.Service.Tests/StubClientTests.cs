@@ -64,7 +64,7 @@ public class StubClientTests
 
         var health = await client.GetHealthAsync();
         var memberships = await client.ListMembershipsAsync("channel-1");
-        var events = await client.ReadChannelEventsAsync(after: null, projectId: "den-gateway", limit: 100);
+        var events = await client.ReadChannelEventsAsync(after: null, projectId: "den-gateway", channelId: null, limit: 100);
 
         Assert.True(health.IsAvailable);
         Assert.Equal("stub", health.Mode);

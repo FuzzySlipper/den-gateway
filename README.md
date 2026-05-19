@@ -55,6 +55,7 @@ Configuration lives under the `DenGateway` section.
       "Enabled": true,
       "Source": "all",
       "DiscoverProjects": true,
+      "ChannelIds": ["21"],
       "ExcludedProjectIds": ["noisy-experimental-project"],
       "SeedNewProjectCursorsAtLatest": true,
       "PollIntervalSeconds": 10,
@@ -76,12 +77,13 @@ DenGateway__Sentinel__SentinelId=den-k8-sentinel-1
 DenGateway__DeliveryLoop__Enabled=true
 DenGateway__DeliveryLoop__Source=all
 DenGateway__DeliveryLoop__DiscoverProjects=true
+DenGateway__DeliveryLoop__ChannelIds__0=21
 DenGateway__DeliveryLoop__SeedNewProjectCursorsAtLatest=true
 ```
 
 `UseStub=true` remains useful for isolated local tests. Production now runs Den Core and Den Channels in HTTP mode via the Den Channels/Core service endpoints.
 
-The delivery loop's intended operator path is project discovery, not manual `ProjectIds` maintenance. With `DiscoverProjects=true`, Gateway asks Den Core for normal project records, checks each project's default Den Channels lane through `/api/gateway/memberships?projectId=...`, and polls projects that have a `project_default` channel plus at least one active wake-relevant agent membership. Use `ExcludedProjectIds` only for explicit opt-outs such as archived, noisy, or experimental projects. Keep `SeedNewProjectCursorsAtLatest=true` for normal rollout so newly discovered projects start from the latest Channels event instead of replaying old channel traffic; set it false only when intentional backfill is desired.
+The delivery loop's intended operator path is project discovery, not manual `ProjectIds` maintenance. With `DiscoverProjects=true`, Gateway asks Den Core for normal project records, checks each project's default Den Channels lane through `/api/gateway/memberships?projectId=...`, and polls projects that have a `project_default` channel plus at least one active wake-relevant agent membership. Use `ChannelIds` for system/global lanes that intentionally have no project id, such as Agent Commons channel `21`; those channel-scoped polls use separate `channel:<id>` cursor keys and do not collide with project-scoped Channels cursors. Use `ExcludedProjectIds` only for explicit opt-outs such as archived, noisy, or experimental projects. Keep `SeedNewProjectCursorsAtLatest=true` for normal rollout so newly discovered projects start from the latest Channels event instead of replaying old channel traffic; set it false only when intentional backfill is desired.
 
 ## Build and test
 

@@ -510,6 +510,95 @@ public class DeliveryLoopTests
     }
 
     [Fact]
+    public async Task ChannelScopedPollUsesChannelIdAndSeparateCursorScopeForGlobalSystemChannels()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        await database.UpsertDeliveryLoopCursorAsync("channels", "den-channels", "555", DateTimeOffset.Parse("2026-05-19T09:00:00Z"));
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot("701", "message_created", "21", "channel_message", "701", "channel-message:701", DateTimeOffset.Parse("2026-05-19T09:30:00Z"))
+            ],
+            MessagesById = new Dictionary<string, ChannelMessageSnapshot>
+            {
+                ["701"] = new ChannelMessageSnapshot("701", "21", "user", "Patch", "human_text", "@reviewer please check agent commons", "wake_event", "direct-agent-message:21:701", "channel-message:701", DateTimeOffset.Parse("2026-05-19T09:30:00Z"))
+            },
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("21", "agent", "reviewer", "mentions_only", "active", 60, new Dictionary<string, string>())
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(Source: "channels", ProjectId: null, Limit: 10, Now: DateTimeOffset.Parse("2026-05-19T09:31:00Z"), ChannelId: "21"));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(1, result.SeenCount);
+        Assert.Equal(1, result.CreatedCount);
+        Assert.Null(channels.LastProjectId);
+        Assert.Equal("21", channels.LastChannelId);
+        Assert.Equal("701", await database.ReadDeliveryLoopCursorAsync("channels", "channel:21"));
+        Assert.Equal("555", await database.ReadDeliveryLoopCursorAsync("channels", "den-channels"));
+        var row = await ReadSingleDeliveryAsync(databasePath);
+        Assert.Equal("reviewer", row.TargetIdentity);
+        Assert.Equal("21", row.ChannelId);
+        Assert.Null(row.ProjectId);
+    }
+
+    [Fact]
+    public async Task PollEndpointAcceptsCamelCaseChannelIdForAgentCommonsPolls()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot("702", "message_created", "21", "channel_message", "702", "channel-message:702", DateTimeOffset.Parse("2026-05-19T09:40:00Z"))
+            ],
+            MessagesById = new Dictionary<string, ChannelMessageSnapshot>
+            {
+                ["702"] = new ChannelMessageSnapshot("702", "21", "user", "Patch", "human_text", "@reviewer camel case smoke", "wake_event", "direct-agent-message:21:702", "channel-message:702", DateTimeOffset.Parse("2026-05-19T09:40:00Z"))
+            },
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("21", "agent", "reviewer", "mentions_only", "active", 60, new Dictionary<string, string>())
+            ]
+        };
+        await using var factory = new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureAppConfiguration((_, config) =>
+                {
+                    config.AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        ["DenGateway:Database:Path"] = databasePath,
+                        ["DenGateway:DenCore:UseStub"] = "true",
+                        ["DenGateway:DenChannels:UseStub"] = "true"
+                    });
+                });
+                builder.ConfigureServices(services =>
+                {
+                    services.AddSingleton<IDenCoreClient>(new FakeDenCoreClient());
+                    services.AddSingleton<IDenChannelsClient>(channels);
+                });
+            });
+        using var client = factory.CreateClient();
+
+        var response = await client.PostAsJsonAsync("/api/delivery-loop/poll", new { source = "channels", channelId = "21", limit = 5, now = "2026-05-19T09:41:00Z" });
+
+        response.EnsureSuccessStatusCode();
+        var body = await response.Content.ReadFromJsonAsync<GatewayDeliveryPollResult>();
+        Assert.NotNull(body);
+        Assert.Equal("completed", body.Status);
+        Assert.Equal(1, body.CreatedCount);
+        Assert.Equal("21", channels.LastChannelId);
+        Assert.Equal(1, await CountDeliveriesAsync(databasePath));
+    }
+
+    [Fact]
     public async Task PollEndpointRunsDeliveryLoopAndReturnsCounts()
     {
         var databasePath = CreateTempDatabasePath();
@@ -654,9 +743,13 @@ public class DeliveryLoopTests
         public Task<ClientListResult<ChannelMembershipSnapshot>> ListMembershipsAsync(string channelId, CancellationToken cancellationToken = default) => Task.FromResult(ClientListResult<ChannelMembershipSnapshot>.Available(Memberships.Where(m => m.ChannelId == channelId).ToArray()));
         public Task<ClientOperationResult> PostMirrorOrSystemMessageAsync(ChannelMirrorMessage message, CancellationToken cancellationToken = default) => Task.FromResult(ClientOperationResult.Completed("ok"));
         public Task<ChannelActivityPostResult> PostActivityEventAsync(ChannelActivityEventWrite activityEvent, CancellationToken cancellationToken = default) => Task.FromResult(ChannelActivityPostResult.Completed("1", "ok"));
-        public Task<ClientListResult<ChannelEventSnapshot>> ReadChannelEventsAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default)
+        public string? LastProjectId { get; private set; }
+        public string? LastChannelId { get; private set; }
+        public Task<ClientListResult<ChannelEventSnapshot>> ReadChannelEventsAsync(string? after, string? projectId, string? channelId, int limit, CancellationToken cancellationToken = default)
         {
             ReadEventsCalls++;
+            LastProjectId = projectId;
+            LastChannelId = channelId;
             return Task.FromResult(EventsAvailable ? ClientListResult<ChannelEventSnapshot>.Available(Events.Take(limit).ToArray()) : ClientListResult<ChannelEventSnapshot>.Unavailable("offline", "channels offline"));
         }
         public Task<ClientValueResult<string>> GetLatestChannelEventCursorAsync(string projectId, CancellationToken cancellationToken = default) => Task.FromResult(LatestCursor is null ? ClientValueResult<string>.Unavailable("empty_cursor", "no events") : ClientValueResult<string>.Available(LatestCursor));

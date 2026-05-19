@@ -33,9 +33,10 @@ public sealed class GatewayDeliveryLoopService
             aggregate.Add(core);
         }
 
+        var channelId = request.GetChannelId();
         if (source is "all" or "channels")
         {
-            var channels = await PollChannelsOnceAsync(request.ProjectId, limit, now, request.SeedCursorAtLatestWhenMissing, cancellationToken);
+            var channels = await PollChannelsOnceAsync(request.ProjectId, channelId, limit, now, request.SeedCursorAtLatestWhenMissing, cancellationToken);
             aggregate.Add(channels);
         }
 
@@ -133,20 +134,21 @@ public sealed class GatewayDeliveryLoopService
         return new GatewayDeliveryPollResult("completed", seen, created, duplicates, suppressed, nextCursor, null, null);
     }
 
-    private async Task<GatewayDeliveryPollResult> PollChannelsOnceAsync(string? projectId, int limit, DateTimeOffset now, bool seedCursorAtLatestWhenMissing, CancellationToken cancellationToken)
+    private async Task<GatewayDeliveryPollResult> PollChannelsOnceAsync(string? projectId, string? channelId, int limit, DateTimeOffset now, bool seedCursorAtLatestWhenMissing, CancellationToken cancellationToken)
     {
-        var after = await _database.ReadDeliveryLoopCursorAsync("channels", projectId, cancellationToken);
-        if (!string.IsNullOrWhiteSpace(projectId) && string.IsNullOrWhiteSpace(after) && seedCursorAtLatestWhenMissing)
+        var cursorScopeKey = GetChannelsCursorScopeKey(projectId, channelId);
+        var after = await _database.ReadDeliveryLoopCursorAsync("channels", cursorScopeKey, cancellationToken);
+        if (string.IsNullOrWhiteSpace(channelId) && !string.IsNullOrWhiteSpace(projectId) && string.IsNullOrWhiteSpace(after) && seedCursorAtLatestWhenMissing)
         {
             var seed = await _denChannelsClient.GetLatestChannelEventCursorAsync(projectId, cancellationToken);
             if (seed.IsAvailable && !string.IsNullOrWhiteSpace(seed.Value))
             {
-                await _database.UpsertDeliveryLoopCursorAsync("channels", projectId, seed.Value, now, cancellationToken);
+                await _database.UpsertDeliveryLoopCursorAsync("channels", cursorScopeKey, seed.Value, now, cancellationToken);
                 return new GatewayDeliveryPollResult("completed", 0, 0, 0, 0, seed.Value, null, "seeded_new_project_cursor_at_latest");
             }
         }
 
-        var events = await _denChannelsClient.ReadChannelEventsAsync(after: after, projectId: projectId, limit: limit, cancellationToken);
+        var events = await _denChannelsClient.ReadChannelEventsAsync(after: after, projectId: projectId, channelId: channelId, limit: limit, cancellationToken);
         if (!events.IsAvailable)
         {
             return GatewayDeliveryPollResult.Degraded("channels_unavailable", events.Message ?? "Den Channels event cursor is unavailable.");
@@ -245,10 +247,20 @@ public sealed class GatewayDeliveryLoopService
 
         if (nextCursor is not null)
         {
-            await _database.UpsertDeliveryLoopCursorAsync("channels", projectId, nextCursor, now, cancellationToken);
+            await _database.UpsertDeliveryLoopCursorAsync("channels", cursorScopeKey, nextCursor, now, cancellationToken);
         }
 
         return new GatewayDeliveryPollResult("completed", seen, created, duplicates, suppressed, nextCursor, null, null);
+    }
+
+    private static string? GetChannelsCursorScopeKey(string? projectId, string? channelId)
+    {
+        if (!string.IsNullOrWhiteSpace(channelId))
+        {
+            return $"channel:{channelId.Trim()}";
+        }
+
+        return string.IsNullOrWhiteSpace(projectId) ? null : projectId.Trim();
     }
 
     private static string GetMetadata(IReadOnlyDictionary<string, string> metadata, string key, string fallback)
@@ -382,7 +394,12 @@ public sealed record GatewayDeliveryPollRequest(
     [property: JsonPropertyName("project_id")] string? ProjectId,
     [property: JsonPropertyName("limit")] int Limit,
     [property: JsonPropertyName("now")] DateTimeOffset? Now = null,
-    [property: JsonPropertyName("seed_cursor_at_latest_when_missing")] bool SeedCursorAtLatestWhenMissing = false);
+    [property: JsonPropertyName("seed_cursor_at_latest_when_missing")] bool SeedCursorAtLatestWhenMissing = false,
+    [property: JsonPropertyName("channel_id")] string? ChannelId = null,
+    [property: JsonPropertyName("channelId")] string? CamelCaseChannelId = null)
+{
+    public string? GetChannelId() => string.IsNullOrWhiteSpace(ChannelId) ? CamelCaseChannelId : ChannelId;
+}
 
 public sealed record GatewayDeliveryPollResult(
     [property: JsonPropertyName("status")] string Status,

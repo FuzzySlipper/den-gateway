@@ -185,7 +185,7 @@ public sealed class ChannelActivityEventRouterTests
                 : ChannelActivityPostResult.Unavailable("offline", "channels offline"));
         }
 
-        public Task<ClientListResult<ChannelEventSnapshot>> ReadChannelEventsAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default) =>
+        public Task<ClientListResult<ChannelEventSnapshot>> ReadChannelEventsAsync(string? after, string? projectId, string? channelId, int limit, CancellationToken cancellationToken = default) =>
             Task.FromResult(ClientListResult<ChannelEventSnapshot>.Available([]));
 
         public Task<ClientValueResult<string>> GetLatestChannelEventCursorAsync(string projectId, CancellationToken cancellationToken = default) =>

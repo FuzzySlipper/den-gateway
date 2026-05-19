@@ -52,10 +52,11 @@ public sealed class GatewayDeliveryLoopHostedService : BackgroundService
                 if (result.Status == "degraded" || result.Status == "rejected")
                 {
                     _logger.LogWarning(
-                        "Gateway delivery loop poll returned {Status} for {Source}/{ProjectId}: {ErrorCode} {Message}",
+                        "Gateway delivery loop poll returned {Status} for {Source}/{ProjectId}/{ChannelId}: {ErrorCode} {Message}",
                         result.Status,
                         request.Source,
                         request.ProjectId ?? "*",
+                        request.GetChannelId() ?? "*",
                         result.ErrorCode,
                         result.Message);
                     continue;
@@ -64,9 +65,10 @@ public sealed class GatewayDeliveryLoopHostedService : BackgroundService
                 if (result.CreatedCount > 0 || result.SuppressedCount > 0 || result.DuplicateCount > 0)
                 {
                     _logger.LogInformation(
-                        "Gateway delivery loop poll completed for {Source}/{ProjectId}: seen={SeenCount}, created={CreatedCount}, duplicates={DuplicateCount}, suppressed={SuppressedCount}, nextCursor={NextCursor}",
+                        "Gateway delivery loop poll completed for {Source}/{ProjectId}/{ChannelId}: seen={SeenCount}, created={CreatedCount}, duplicates={DuplicateCount}, suppressed={SuppressedCount}, nextCursor={NextCursor}",
                         request.Source,
                         request.ProjectId ?? "*",
+                        request.GetChannelId() ?? "*",
                         result.SeenCount,
                         result.CreatedCount,
                         result.DuplicateCount,
@@ -94,13 +96,18 @@ public sealed class GatewayDeliveryLoopHostedService : BackgroundService
             .Select(projectId => projectId.Trim())
             .Distinct(StringComparer.Ordinal)
             .ToArray();
+        var configuredChannels = options.ChannelIds
+            .Where(channelId => !string.IsNullOrWhiteSpace(channelId))
+            .Select(channelId => channelId.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
 
         if (!string.IsNullOrWhiteSpace(configuredProject))
         {
             return [new GatewayDeliveryPollRequest(options.Source, configuredProject, options.Limit, now, options.SeedNewProjectCursorsAtLatest)];
         }
 
-        if (!ChannelDiscoveryApplies(options.Source, options.DiscoverProjects) && configuredProjects.Length == 0)
+        if (!ChannelDiscoveryApplies(options.Source, options.DiscoverProjects) && configuredProjects.Length == 0 && configuredChannels.Length == 0)
         {
             return [new GatewayDeliveryPollRequest(options.Source, null, options.Limit, now)];
         }
@@ -113,15 +120,22 @@ public sealed class GatewayDeliveryLoopHostedService : BackgroundService
                 .ToArray();
         }
 
+        var channelPolls = configuredChannels
+            .Select(channelId => new GatewayDeliveryPollRequest("channels", null, options.Limit, now, SeedCursorAtLatestWhenMissing: false, ChannelId: channelId))
+            .ToArray();
+
         if (string.Equals(options.Source, "channels", StringComparison.OrdinalIgnoreCase))
         {
-            return channelProjects.Select(projectId => new GatewayDeliveryPollRequest("channels", projectId, options.Limit, now, options.SeedNewProjectCursorsAtLatest)).ToArray();
+            return channelProjects.Select(projectId => new GatewayDeliveryPollRequest("channels", projectId, options.Limit, now, options.SeedNewProjectCursorsAtLatest))
+                .Concat(channelPolls)
+                .ToArray();
         }
 
         if (string.Equals(options.Source, "all", StringComparison.OrdinalIgnoreCase))
         {
             return new[] { new GatewayDeliveryPollRequest("core", null, options.Limit, now) }
                 .Concat(channelProjects.Select(projectId => new GatewayDeliveryPollRequest("channels", projectId, options.Limit, now, options.SeedNewProjectCursorsAtLatest)))
+                .Concat(channelPolls)
                 .ToArray();
         }
 

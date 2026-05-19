@@ -169,10 +169,14 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
         return ChannelActivityPostResult.Completed(dto?.Id.ToString(), "Den Channels accepted the activity event.");
     }
 
-    public async Task<ClientListResult<ChannelEventSnapshot>> ReadChannelEventsAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default)
+    public async Task<ClientListResult<ChannelEventSnapshot>> ReadChannelEventsAsync(string? after, string? projectId, string? channelId, int limit, CancellationToken cancellationToken = default)
     {
         var query = new List<string>();
-        if (!string.IsNullOrWhiteSpace(projectId))
+        if (!string.IsNullOrWhiteSpace(channelId))
+        {
+            query.Add($"channelId={Uri.EscapeDataString(channelId)}");
+        }
+        else if (!string.IsNullOrWhiteSpace(projectId))
         {
             query.Add($"projectId={Uri.EscapeDataString(projectId)}");
         }

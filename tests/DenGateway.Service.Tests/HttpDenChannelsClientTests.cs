@@ -181,7 +181,7 @@ public class HttpDenChannelsClientTests
             });
         });
 
-        var events = await client.ReadChannelEventsAsync("10", "den-gateway", 2);
+        var events = await client.ReadChannelEventsAsync("10", "den-gateway", null, 2);
 
         Assert.True(events.IsAvailable);
         var item = Assert.Single(events.Items);
@@ -189,6 +189,43 @@ public class HttpDenChannelsClientTests
         Assert.Equal("channel_message", item.SourceKind);
         Assert.Equal("event:11", item.DedupeKey);
         Assert.Equal(DateTimeOffset.Parse("2026-05-13T07:00:00Z"), item.OccurredAt);
+    }
+
+    [Fact]
+    public async Task ReadChannelEventsAsyncPrefersChannelIdForSystemChannels()
+    {
+        var client = NewClient((request, _) =>
+        {
+            Assert.Equal("/api/gateway/events", request.RequestUri!.AbsolutePath);
+            Assert.Equal("channelId=21&afterId=700&limit=5", request.RequestUri.Query.TrimStart('?'));
+            return Json(new
+            {
+                items = new[]
+                {
+                    new
+                    {
+                        id = 701,
+                        channelId = 21,
+                        messageKind = "human_text",
+                        senderType = "user",
+                        senderIdentity = "patch",
+                        sourceKind = "channel_message",
+                        sourceId = "701",
+                        dedupeKey = "event:701",
+                        createdAt = "2026-05-19T09:30:00Z"
+                    }
+                },
+                nextAfterId = 701,
+                hasMore = false
+            });
+        });
+
+        var events = await client.ReadChannelEventsAsync("700", projectId: null, channelId: "21", limit: 5);
+
+        Assert.True(events.IsAvailable);
+        var item = Assert.Single(events.Items);
+        Assert.Equal("701", item.Cursor);
+        Assert.Equal("21", item.ChannelId);
     }
 
     [Fact]

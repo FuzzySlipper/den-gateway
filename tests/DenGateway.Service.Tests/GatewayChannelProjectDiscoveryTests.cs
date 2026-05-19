@@ -123,6 +123,7 @@ public class GatewayChannelProjectDiscoveryTests
         public Task<ClientValueResult<ChannelMessageSnapshot>> GetChannelMessageAsync(string channelMessageId, CancellationToken cancellationToken = default) => Task.FromResult(ClientValueResult<ChannelMessageSnapshot>.Unavailable("not_found", "missing"));
         public Task<ClientListResult<ChannelMembershipSnapshot>> ListMembershipsAsync(string channelId, CancellationToken cancellationToken = default) => Task.FromResult(ClientListResult<ChannelMembershipSnapshot>.Available([]));
         public Task<ClientOperationResult> PostMirrorOrSystemMessageAsync(ChannelMirrorMessage message, CancellationToken cancellationToken = default) => Task.FromResult(ClientOperationResult.Completed("ok"));
+        public Task<ChannelActivityPostResult> PostActivityEventAsync(ChannelActivityEventWrite activityEvent, CancellationToken cancellationToken = default) => Task.FromResult(ChannelActivityPostResult.Completed("1", "ok"));
         public Task<ClientListResult<ChannelEventSnapshot>> ReadChannelEventsAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default) => Task.FromResult(ClientListResult<ChannelEventSnapshot>.Available([]));
         public Task<ClientValueResult<string>> GetLatestChannelEventCursorAsync(string projectId, CancellationToken cancellationToken = default) => Task.FromResult(ClientValueResult<string>.Unavailable("empty_cursor", "no events"));
     }

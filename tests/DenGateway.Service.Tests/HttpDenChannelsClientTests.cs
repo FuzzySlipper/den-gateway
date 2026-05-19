@@ -263,6 +263,46 @@ public class HttpDenChannelsClientTests
         Assert.Equal("completed", result.Status);
     }
 
+    [Fact]
+    public async Task PostActivityEventAsyncPostsChannelActivityContract()
+    {
+        var client = NewClient(async (request, cancellationToken) =>
+        {
+            Assert.Equal(HttpMethod.Post, request.Method);
+            Assert.Equal("/api/channels/42/activity-events", request.RequestUri!.AbsolutePath);
+            var body = await request.Content!.ReadFromJsonAsync<Dictionary<string, object?>>(cancellationToken);
+            Assert.NotNull(body);
+            Assert.Equal("den-channels", body["projectId"]?.ToString());
+            Assert.Equal("den-mcp-runner", body["agentIdentity"]?.ToString());
+            Assert.Equal("delivery-1527", body["deliveryRequestId"]?.ToString());
+            Assert.Equal("session-1527", body["hermesSessionKey"]?.ToString());
+            Assert.Equal("tool_call_started", body["eventType"]?.ToString());
+            Assert.Equal("activity:delivery-1527:1", body["dedupeKey"]?.ToString());
+            return Json(new { id = 99, status = "started" }, HttpStatusCode.Created);
+        });
+
+        var result = await client.PostActivityEventAsync(new ChannelActivityEventWrite(
+            ChannelId: "42",
+            ProjectId: "den-channels",
+            AgentIdentity: "den-mcp-runner",
+            DeliveryRequestId: "delivery-1527",
+            HermesSessionKey: "session-1527",
+            TaskId: 1527,
+            ThreadId: 6448,
+            AnchorMessageId: 101,
+            EventType: "tool_call_started",
+            Status: "started",
+            Sequence: 1,
+            Title: "terminal",
+            Summary: "dotnet test",
+            PreviewJson: "{}",
+            MetadataJson: "{}",
+            DedupeKey: "activity:delivery-1527:1"));
+
+        Assert.True(result.IsAvailable);
+        Assert.Equal("99", result.ActivityEventId);
+    }
+
     private static HttpDenChannelsClient NewClient(Func<HttpRequestMessage, CancellationToken, HttpResponseMessage> handler)
     {
         var httpClient = new HttpClient(new DelegateHandler(handler)) { BaseAddress = new Uri("http://den-channels.test") };

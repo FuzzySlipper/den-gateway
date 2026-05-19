@@ -140,6 +140,35 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
         return ClientOperationResult.Completed("Den Channels accepted the Gateway system/mirror message.");
     }
 
+    public async Task<ChannelActivityPostResult> PostActivityEventAsync(ChannelActivityEventWrite activityEvent,
+        CancellationToken cancellationToken = default)
+    {
+        var request = new PostChannelActivityEventRequest(
+            ProjectId: activityEvent.ProjectId,
+            AgentIdentity: activityEvent.AgentIdentity,
+            DeliveryRequestId: activityEvent.DeliveryRequestId,
+            HermesSessionKey: activityEvent.HermesSessionKey,
+            TaskId: activityEvent.TaskId,
+            ThreadId: activityEvent.ThreadId,
+            AnchorMessageId: activityEvent.AnchorMessageId,
+            EventType: activityEvent.EventType,
+            Status: activityEvent.Status,
+            Sequence: activityEvent.Sequence,
+            Title: activityEvent.Title,
+            Summary: activityEvent.Summary,
+            PreviewJson: activityEvent.PreviewJson,
+            MetadataJson: activityEvent.MetadataJson,
+            DedupeKey: activityEvent.DedupeKey);
+        var response = await _httpClient.PostAsJsonAsync($"/api/channels/{Uri.EscapeDataString(activityEvent.ChannelId)}/activity-events", request, JsonOptions, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            return ChannelActivityPostResult.Unavailable($"http_{(int)response.StatusCode}", "Den Channels activity-event post failed.");
+        }
+
+        var dto = await response.Content.ReadFromJsonAsync<ChannelActivityEventDto>(JsonOptions, cancellationToken);
+        return ChannelActivityPostResult.Completed(dto?.Id.ToString(), "Den Channels accepted the activity event.");
+    }
+
     public async Task<ClientListResult<ChannelEventSnapshot>> ReadChannelEventsAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default)
     {
         var query = new List<string>();
@@ -260,4 +289,6 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
     private sealed record GatewayEventsDto(IReadOnlyList<GatewayEventItemDto> Items, long? NextAfterId, bool HasMore);
     private sealed record GatewayEventItemDto(long Id, long ChannelId, string MessageKind, string SenderType, string SenderIdentity, string? SourceKind, string? SourceId, string? SourceProjectId, string? DedupeKey, string? DeepLink, string? Summary, string Body, string CreatedAt);
     private sealed record PostGatewaySystemMessageRequest(long? ChannelId, string? ProjectId, string SenderIdentity, string MessageKind, string Body, string SourceKind, string SourceId, string? SourceProjectId, string? Summary, string? DeepLink, string MetadataJson, string DedupeKey);
+    private sealed record PostChannelActivityEventRequest(string? ProjectId, string AgentIdentity, string? DeliveryRequestId, string? HermesSessionKey, long? TaskId, long? ThreadId, long? AnchorMessageId, string EventType, string Status, long? Sequence, string? Title, string? Summary, string? PreviewJson, string? MetadataJson, string? DedupeKey);
+    private sealed record ChannelActivityEventDto(long Id);
 }

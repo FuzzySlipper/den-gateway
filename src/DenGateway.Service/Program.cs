@@ -1,3 +1,4 @@
+using DenGateway.Service.Activity;
 using DenGateway.Service.Bindings;
 using DenGateway.Service.Clients;
 using DenGateway.Service.DeliveryLoop;
@@ -17,6 +18,7 @@ var configuredOptions = builder.Configuration.GetSection(DenGatewayOptions.Secti
 builder.Services.AddSingleton(sp => new GatewayDatabase(sp.GetRequiredService<IOptions<DenGatewayOptions>>().Value.Database.Path));
 builder.Services.AddSingleton(sp => new BindingSnapshotSettings(sp.GetRequiredService<IOptions<DenGatewayOptions>>().Value.Sentinel.BindingTtlMinutes));
 builder.Services.AddSingleton<BindingSnapshotService>();
+builder.Services.AddSingleton<ChannelActivityEventRouter>();
 builder.Services.AddSingleton<GatewayDeliveryLoopService>();
 builder.Services.AddSingleton<GatewayChannelProjectDiscoveryService>();
 builder.Services.AddHostedService<GatewayDeliveryLoopHostedService>();
@@ -187,6 +189,15 @@ app.MapPost("/api/delivery-loop/poll", async (GatewayDeliveryLoopService deliver
     var result = await deliveryLoop.PollOnceAsync(request, cancellationToken);
     return result.Status == "rejected" ? Results.BadRequest(result) : Results.Ok(result);
 });
+
+app.MapPost("/api/channel-activity-events", async (ChannelActivityEventRouter router, GatewayChannelActivityEventRequest request,
+    CancellationToken cancellationToken) =>
+{
+    var result = await router.RouteAsync(request, cancellationToken);
+    return result.Status == "rejected" ? Results.BadRequest(result) : Results.Ok(result);
+});
+
+app.MapGet("/api/channel-activity-events/status", (ChannelActivityEventRouter router) => Results.Ok(router.GetStatus()));
 
 app.MapPost("/api/binding-snapshots/refresh", async (BindingSnapshotService bindingSnapshots, BindingSnapshotRefreshRequest request, CancellationToken cancellationToken) =>
 {

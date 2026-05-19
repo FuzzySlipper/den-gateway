@@ -17,6 +17,7 @@ public interface IDenChannelsClient
     Task<ClientValueResult<ChannelMessageSnapshot>> GetChannelMessageAsync(string channelMessageId, CancellationToken cancellationToken = default);
     Task<ClientListResult<ChannelMembershipSnapshot>> ListMembershipsAsync(string channelId, CancellationToken cancellationToken = default);
     Task<ClientOperationResult> PostMirrorOrSystemMessageAsync(ChannelMirrorMessage message, CancellationToken cancellationToken = default);
+    Task<ChannelActivityPostResult> PostActivityEventAsync(ChannelActivityEventWrite activityEvent, CancellationToken cancellationToken = default);
     Task<ClientListResult<ChannelEventSnapshot>> ReadChannelEventsAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default);
     Task<ClientValueResult<string>> GetLatestChannelEventCursorAsync(string projectId, CancellationToken cancellationToken = default);
 }
@@ -109,6 +110,13 @@ public sealed class StubDenChannelsClient : IDenChannelsClient
             "Posting Gateway mirror/system messages to Den Channels is deferred until the channel event contract matures."));
     }
 
+    public Task<ChannelActivityPostResult> PostActivityEventAsync(ChannelActivityEventWrite activityEvent, CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(ChannelActivityPostResult.Unavailable(
+            "not_implemented",
+            "Posting activity events to Den Channels is unavailable in stub mode."));
+    }
+
     public Task<ClientListResult<ChannelEventSnapshot>> ReadChannelEventsAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default)
     {
         return Task.FromResult(ClientListResult<ChannelEventSnapshot>.Unavailable(
@@ -146,6 +154,12 @@ public sealed record ClientOperationResult(bool IsAvailable, string Status, stri
 {
     public static ClientOperationResult Completed(string message) => new(true, "completed", null, message);
     public static ClientOperationResult Unavailable(string errorCode, string message) => new(false, "unavailable", errorCode, message);
+}
+
+public sealed record ChannelActivityPostResult(bool IsAvailable, string Status, string? ActivityEventId, string? ErrorCode, string? Message)
+{
+    public static ChannelActivityPostResult Completed(string? activityEventId, string message) => new(true, "completed", activityEventId, null, message);
+    public static ChannelActivityPostResult Unavailable(string errorCode, string message) => new(false, "unavailable", null, errorCode, message);
 }
 
 public sealed record GatewayBindingSnapshot(
@@ -235,6 +249,24 @@ public sealed record ChannelMirrorMessage(
     string? DeepLink,
     string DedupeKey,
     IReadOnlyDictionary<string, string> Metadata);
+
+public sealed record ChannelActivityEventWrite(
+    string ChannelId,
+    string? ProjectId,
+    string AgentIdentity,
+    string? DeliveryRequestId,
+    string? HermesSessionKey,
+    long? TaskId,
+    long? ThreadId,
+    long? AnchorMessageId,
+    string EventType,
+    string Status,
+    long? Sequence,
+    string? Title,
+    string? Summary,
+    string? PreviewJson,
+    string? MetadataJson,
+    string? DedupeKey);
 
 public sealed record ChannelEventSnapshot(
     string Cursor,

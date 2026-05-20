@@ -172,6 +172,7 @@ public sealed class GatewayDeliveryLoopService
             }
 
             var message = messageResult.Value;
+            var directAgentTargetIdentity = TryGetDirectAgentTargetIdentity(channelEvent, message);
             foreach (var membership in membershipsResult.Items)
             {
                 if (!string.Equals(membership.Status, "active", StringComparison.OrdinalIgnoreCase))
@@ -187,7 +188,14 @@ public sealed class GatewayDeliveryLoopService
                     continue;
                 }
 
-                var deliveryDecision = ResolveMembershipDeliveryMode(membership, message, channelEvent);
+                if (!string.IsNullOrWhiteSpace(directAgentTargetIdentity)
+                    && !string.Equals(membership.MemberIdentity, directAgentTargetIdentity, StringComparison.OrdinalIgnoreCase))
+                {
+                    suppressed++;
+                    continue;
+                }
+
+                var deliveryDecision = ResolveMembershipDeliveryMode(membership, message, channelEvent, directAgentTargetIdentity);
                 if (deliveryDecision.DeliveryMode is null)
                 {
                     if (deliveryDecision.CountAsSuppressed)
@@ -224,6 +232,7 @@ public sealed class GatewayDeliveryLoopService
                         ["sender_type"] = message?.SenderType,
                         ["sender_identity"] = message?.SenderIdentity,
                         ["wake_policy"] = membership.WakePolicy,
+                        ["direct_agent_target"] = directAgentTargetIdentity,
                         ["cascade_depth"] = cascadeDepth
                     }, JsonOptions),
                     Status: "pending",
@@ -273,10 +282,11 @@ public sealed class GatewayDeliveryLoopService
         return int.TryParse(value, out var parsed) ? parsed : null;
     }
 
-    private static DeliveryModeDecision ResolveMembershipDeliveryMode(ChannelMembershipSnapshot membership, ChannelMessageSnapshot? message, ChannelEventSnapshot channelEvent)
+    private static DeliveryModeDecision ResolveMembershipDeliveryMode(ChannelMembershipSnapshot membership, ChannelMessageSnapshot? message, ChannelEventSnapshot channelEvent, string? directAgentTargetIdentity)
     {
         var wakePolicy = membership.WakePolicy.Trim().ToLowerInvariant();
-        if (message is not null && string.Equals(message.SourceKind, "wake_event", StringComparison.OrdinalIgnoreCase))
+        if (!string.IsNullOrWhiteSpace(directAgentTargetIdentity)
+            && string.Equals(membership.MemberIdentity, directAgentTargetIdentity, StringComparison.OrdinalIgnoreCase))
         {
             return new DeliveryModeDecision("wake", false);
         }
@@ -311,6 +321,40 @@ public sealed class GatewayDeliveryLoopService
         return message is not null
             && string.Equals(message.SenderType, "user", StringComparison.OrdinalIgnoreCase)
             && string.Equals(message.MessageKind, "human_text", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? TryGetDirectAgentTargetIdentity(ChannelEventSnapshot channelEvent, ChannelMessageSnapshot? message)
+    {
+        var sourceKind = message?.SourceKind ?? channelEvent.SourceKind;
+        var sourceId = message?.SourceId ?? channelEvent.SourceId;
+        if (!string.Equals(sourceKind, "wake_event", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(sourceKind, "direct_agent_message", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(sourceId)
+            || !sourceId.StartsWith("direct-agent-message:", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var parts = sourceId.Split(':');
+        if (parts.Length < 4 || string.IsNullOrWhiteSpace(parts[2]))
+        {
+            return null;
+        }
+
+        // Legacy direct-agent source ids used the numeric channel_membership id
+        // as the third segment. That is not enough to route safely from the
+        // Gateway membership snapshot, so fail closed to normal wake-policy
+        // evaluation rather than broadcasting a wake_event to every member.
+        if (long.TryParse(parts[2], out _))
+        {
+            return null;
+        }
+
+        return Uri.UnescapeDataString(parts[2]);
     }
 
     private static int CalculateCascadeDepth(ChannelMessageSnapshot? message)

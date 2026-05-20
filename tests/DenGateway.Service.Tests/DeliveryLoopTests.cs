@@ -229,6 +229,76 @@ public class DeliveryLoopTests
     }
 
     [Fact]
+    public async Task AgentCommonsDirectAgentWakeTargetsOnlyEncodedMemberIdentity()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot("372", "message_created", "21", "wake_event", "direct-agent-message:21:reviewer:1779267407642", "channel-message:372", DateTimeOffset.Parse("2026-05-20T09:00:00Z"))
+            ],
+            MessagesById = new Dictionary<string, ChannelMessageSnapshot>
+            {
+                ["372"] = new ChannelMessageSnapshot("372", "21", "user", "den-web", "human_text", "Please review task 1557", "wake_event", "direct-agent-message:21:reviewer:1779267407642", "channel-message:372", DateTimeOffset.Parse("2026-05-20T09:00:00Z"))
+            },
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("21", "agent", "reviewer", "mentions_only", "active", 60, new Dictionary<string, string>()),
+                new ChannelMembershipSnapshot("21", "agent", "den-mcp-runner", "mentions_only", "active", 60, new Dictionary<string, string>()),
+                new ChannelMembershipSnapshot("21", "agent", "sysadmin", "mentions_only", "active", 60, new Dictionary<string, string>())
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(Source: "channels", ProjectId: null, Limit: 10, Now: DateTimeOffset.Parse("2026-05-20T09:01:00Z"), ChannelId: "21"));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(1, result.SeenCount);
+        Assert.Equal(1, result.CreatedCount);
+        Assert.Equal(2, result.SuppressedCount);
+        var row = await ReadSingleDeliveryAsync(databasePath);
+        Assert.Equal("reviewer", row.TargetIdentity);
+        Assert.Equal("wake", row.DeliveryMode);
+        Assert.Contains("direct_agent_target", row.MetadataJson);
+    }
+
+    [Fact]
+    public async Task AmbiguousLegacyDirectAgentWakeEventDoesNotBypassMentionsOnly()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot("373", "message_created", "21", "wake_event", "direct-agent-message:21:44:1779267407642", "channel-message:373", DateTimeOffset.Parse("2026-05-20T09:02:00Z"))
+            ],
+            MessagesById = new Dictionary<string, ChannelMessageSnapshot>
+            {
+                ["373"] = new ChannelMessageSnapshot("373", "21", "user", "den-web", "human_text", "Please review task 1557", "wake_event", "direct-agent-message:21:44:1779267407642", "channel-message:373", DateTimeOffset.Parse("2026-05-20T09:02:00Z"))
+            },
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("21", "agent", "reviewer", "mentions_only", "active", 60, new Dictionary<string, string>()),
+                new ChannelMembershipSnapshot("21", "agent", "den-mcp-runner", "mentions_only", "active", 60, new Dictionary<string, string>())
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(Source: "channels", ProjectId: null, Limit: 10, Now: DateTimeOffset.Parse("2026-05-20T09:03:00Z"), ChannelId: "21"));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(1, result.SeenCount);
+        Assert.Equal(0, result.CreatedCount);
+        Assert.Equal(2, result.SuppressedCount);
+        Assert.Equal(0, await CountDeliveriesAsync(databasePath));
+    }
+
+    [Fact]
     public async Task ChannelAllMessagesExceptSelfSuppressesMatchingSenderIdentity()
     {
         var databasePath = CreateTempDatabasePath();

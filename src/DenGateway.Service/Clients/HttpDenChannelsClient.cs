@@ -147,7 +147,12 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
             ProjectId: activityEvent.ProjectId,
             AgentIdentity: activityEvent.AgentIdentity,
             DeliveryRequestId: activityEvent.DeliveryRequestId,
+            DisplayBlockId: activityEvent.DisplayBlockId,
             HermesSessionKey: activityEvent.HermesSessionKey,
+            ParentHermesSessionKey: activityEvent.ParentHermesSessionKey,
+            ParentAgentIdentity: activityEvent.ParentAgentIdentity,
+            WorkerRunId: activityEvent.WorkerRunId,
+            WorkerRole: activityEvent.WorkerRole,
             TaskId: activityEvent.TaskId,
             ThreadId: activityEvent.ThreadId,
             AnchorMessageId: activityEvent.AnchorMessageId,
@@ -293,6 +298,6 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
     private sealed record GatewayEventsDto(IReadOnlyList<GatewayEventItemDto> Items, long? NextAfterId, bool HasMore);
     private sealed record GatewayEventItemDto(long Id, long ChannelId, string MessageKind, string SenderType, string SenderIdentity, string? SourceKind, string? SourceId, string? SourceProjectId, string? DedupeKey, string? DeepLink, string? Summary, string Body, string CreatedAt);
     private sealed record PostGatewaySystemMessageRequest(long? ChannelId, string? ProjectId, string SenderIdentity, string MessageKind, string Body, string SourceKind, string SourceId, string? SourceProjectId, string? Summary, string? DeepLink, string MetadataJson, string DedupeKey);
-    private sealed record PostChannelActivityEventRequest(string? ProjectId, string AgentIdentity, string? DeliveryRequestId, string? HermesSessionKey, long? TaskId, long? ThreadId, long? AnchorMessageId, string EventType, string Status, long? Sequence, string? Title, string? Summary, string? PreviewJson, string? MetadataJson, string? DedupeKey);
+    private sealed record PostChannelActivityEventRequest(string? ProjectId, string AgentIdentity, string? DeliveryRequestId, string? DisplayBlockId, string? HermesSessionKey, string? ParentHermesSessionKey, string? ParentAgentIdentity, string? WorkerRunId, string? WorkerRole, long? TaskId, long? ThreadId, long? AnchorMessageId, string EventType, string Status, long? Sequence, string? Title, string? Summary, string? PreviewJson, string? MetadataJson, string? DedupeKey);
     private sealed record ChannelActivityEventDto(long Id);
 }

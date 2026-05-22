@@ -25,7 +25,12 @@ public sealed class ChannelActivityEventRouterTests
             projectId = "den-channels",
             agentIdentity = "den-mcp-runner",
             deliveryRequestId = "delivery-1527",
+            displayBlockId = "display-block-parent-1564",
             hermesSessionKey = "session-1527",
+            parentHermesSessionKey = "parent-session-1564",
+            parentAgentIdentity = "parent-agent",
+            workerRunId = "worker-run-1564",
+            workerRole = "coder",
             taskId = 1527,
             threadId = 6448,
             anchorMessageId = 101,
@@ -46,8 +51,44 @@ public sealed class ChannelActivityEventRouterTests
         var write = Assert.Single(channels.ActivityEvents);
         Assert.Equal("42", write.ChannelId);
         Assert.Equal("delivery-1527", write.DeliveryRequestId);
+        Assert.Equal("display-block-parent-1564", write.DisplayBlockId);
         Assert.Equal("session-1527", write.HermesSessionKey);
+        Assert.Equal("parent-session-1564", write.ParentHermesSessionKey);
+        Assert.Equal("parent-agent", write.ParentAgentIdentity);
+        Assert.Equal("worker-run-1564", write.WorkerRunId);
+        Assert.Equal("coder", write.WorkerRole);
         Assert.Equal("tool_call_started", write.EventType);
+        Assert.Equal(0, await CountDeliveriesAsync(databasePath));
+    }
+
+    [Fact]
+    public async Task ActivityRouteAcceptsMinimalPayloadWithoutDisplayBlockOrWorkerMetadata()
+    {
+        var databasePath = CreateTempDatabasePath();
+        var channels = new RecordingChannelsClient();
+        await using var factory = NewFactory(databasePath, channels);
+        using var client = factory.CreateClient();
+
+        using var response = await client.PostAsJsonAsync("/api/channel-activity-events", new
+        {
+            channelId = "42",
+            agentIdentity = "den-mcp-runner"
+        });
+
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<ActivityRoutePayload>();
+        Assert.NotNull(result);
+        Assert.Equal("recorded", result.Status);
+        Assert.True(result.Recorded);
+
+        var write = Assert.Single(channels.ActivityEvents);
+        Assert.Null(write.DisplayBlockId);
+        Assert.Null(write.ParentHermesSessionKey);
+        Assert.Null(write.ParentAgentIdentity);
+        Assert.Null(write.WorkerRunId);
+        Assert.Null(write.WorkerRole);
+        Assert.Equal("lifecycle_status", write.EventType);
+        Assert.Equal("interim", write.Status);
         Assert.Equal(0, await CountDeliveriesAsync(databasePath));
     }
 
@@ -64,6 +105,8 @@ public sealed class ChannelActivityEventRouterTests
             channelId = "42",
             agentIdentity = "den-mcp-runner",
             deliveryRequestId = "delivery-1527",
+            displayBlockId = "display-block-1564",
+            workerRunId = "worker-run-1564",
             eventType = "tool_call_failed"
         });
 
@@ -80,6 +123,8 @@ public sealed class ChannelActivityEventRouterTests
         var failure = Assert.Single(status.RecentFailures);
         Assert.Equal("42", failure.ChannelId);
         Assert.Equal("delivery-1527", failure.DeliveryRequestId);
+        Assert.Equal("display-block-1564", failure.DisplayBlockId);
+        Assert.Equal("worker-run-1564", failure.WorkerRunId);
         Assert.Equal("offline", failure.ErrorCode);
     }
 
@@ -194,5 +239,5 @@ public sealed class ChannelActivityEventRouterTests
 
     private sealed record ActivityRoutePayload(string Status, bool Recorded, string? ActivityEventId, string? ErrorCode, string? Message);
     private sealed record ActivityRouterStatusPayload(IReadOnlyList<ActivityDiagnosticPayload> RecentFailures);
-    private sealed record ActivityDiagnosticPayload(string ChannelId, string? DeliveryRequestId, string ErrorCode);
+    private sealed record ActivityDiagnosticPayload(string ChannelId, string? DeliveryRequestId, string? DisplayBlockId, string? WorkerRunId, string ErrorCode);
 }

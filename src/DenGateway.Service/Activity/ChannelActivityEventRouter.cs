@@ -35,7 +35,12 @@ public sealed class ChannelActivityEventRouter
             ProjectId: request.ProjectId,
             AgentIdentity: request.AgentIdentity,
             DeliveryRequestId: request.DeliveryRequestId,
+            DisplayBlockId: request.DisplayBlockId,
             HermesSessionKey: request.HermesSessionKey,
+            ParentHermesSessionKey: request.ParentHermesSessionKey,
+            ParentAgentIdentity: request.ParentAgentIdentity,
+            WorkerRunId: request.WorkerRunId,
+            WorkerRole: request.WorkerRole,
             TaskId: request.TaskId,
             ThreadId: request.ThreadId,
             AnchorMessageId: request.AnchorMessageId,
@@ -58,9 +63,11 @@ public sealed class ChannelActivityEventRouter
             var exceptionDiagnostic = BuildDiagnostic(request, "activity_record_exception", ex.Message);
             RecordDiagnostic(exceptionDiagnostic);
             _logger.LogWarning(ex,
-                "Den Channels activity event write threw for channel {ChannelId}, delivery {DeliveryRequestId}.",
+                "Den Channels activity event write threw for channel {ChannelId}, delivery {DeliveryRequestId}, display block {DisplayBlockId}, worker run {WorkerRunId}.",
                 exceptionDiagnostic.ChannelId,
-                exceptionDiagnostic.DeliveryRequestId);
+                exceptionDiagnostic.DeliveryRequestId,
+                exceptionDiagnostic.DisplayBlockId,
+                exceptionDiagnostic.WorkerRunId);
             return new ChannelActivityRouteResult("degraded", false, null, exceptionDiagnostic.ErrorCode, exceptionDiagnostic.Message);
         }
 
@@ -75,9 +82,11 @@ public sealed class ChannelActivityEventRouter
             result.Message ?? "Den Channels activity event write failed.");
         RecordDiagnostic(diagnostic);
         _logger.LogWarning(
-            "Den Channels activity event write failed for channel {ChannelId}, delivery {DeliveryRequestId}: {ErrorCode} {Message}",
+            "Den Channels activity event write failed for channel {ChannelId}, delivery {DeliveryRequestId}, display block {DisplayBlockId}, worker run {WorkerRunId}: {ErrorCode} {Message}",
             diagnostic.ChannelId,
             diagnostic.DeliveryRequestId,
+            diagnostic.DisplayBlockId,
+            diagnostic.WorkerRunId,
             diagnostic.ErrorCode,
             diagnostic.Message);
 
@@ -98,6 +107,8 @@ public sealed class ChannelActivityEventRouter
         ProjectId: request.ProjectId,
         AgentIdentity: request.AgentIdentity,
         DeliveryRequestId: request.DeliveryRequestId,
+        DisplayBlockId: request.DisplayBlockId,
+        WorkerRunId: request.WorkerRunId,
         ErrorCode: errorCode,
         Message: message);
 
@@ -119,7 +130,12 @@ public sealed record GatewayChannelActivityEventRequest(
     string? ProjectId,
     string AgentIdentity,
     string? DeliveryRequestId,
+    string? DisplayBlockId,
     string? HermesSessionKey,
+    string? ParentHermesSessionKey,
+    string? ParentAgentIdentity,
+    string? WorkerRunId,
+    string? WorkerRole,
     long? TaskId,
     long? ThreadId,
     long? AnchorMessageId,
@@ -147,5 +163,7 @@ public sealed record ChannelActivityDiagnostic(
     string? ProjectId,
     string AgentIdentity,
     string? DeliveryRequestId,
+    string? DisplayBlockId,
+    string? WorkerRunId,
     string ErrorCode,
     string Message);

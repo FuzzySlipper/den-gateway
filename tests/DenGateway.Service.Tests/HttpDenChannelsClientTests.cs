@@ -312,9 +312,15 @@ public class HttpDenChannelsClientTests
             Assert.Equal("den-channels", body["projectId"]?.ToString());
             Assert.Equal("den-mcp-runner", body["agentIdentity"]?.ToString());
             Assert.Equal("delivery-1527", body["deliveryRequestId"]?.ToString());
+            Assert.Equal("display-block-1564", body["displayBlockId"]?.ToString());
             Assert.Equal("session-1527", body["hermesSessionKey"]?.ToString());
+            Assert.Equal("parent-session-1564", body["parentHermesSessionKey"]?.ToString());
+            Assert.Equal("parent-agent", body["parentAgentIdentity"]?.ToString());
+            Assert.Equal("worker-run-1564", body["workerRunId"]?.ToString());
+            Assert.Equal("coder", body["workerRole"]?.ToString());
             Assert.Equal("tool_call_started", body["eventType"]?.ToString());
             Assert.Equal("activity:delivery-1527:1", body["dedupeKey"]?.ToString());
+            Assert.False(body.ContainsKey("displayDeliveryRequestId"));
             return Json(new { id = 99, status = "started" }, HttpStatusCode.Created);
         });
 
@@ -323,7 +329,12 @@ public class HttpDenChannelsClientTests
             ProjectId: "den-channels",
             AgentIdentity: "den-mcp-runner",
             DeliveryRequestId: "delivery-1527",
+            DisplayBlockId: "display-block-1564",
             HermesSessionKey: "session-1527",
+            ParentHermesSessionKey: "parent-session-1564",
+            ParentAgentIdentity: "parent-agent",
+            WorkerRunId: "worker-run-1564",
+            WorkerRole: "coder",
             TaskId: 1527,
             ThreadId: 6448,
             AnchorMessageId: 101,

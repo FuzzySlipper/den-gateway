@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using DenGateway.Service.Clients;
 using DenGateway.Service.Persistence;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -11,54 +13,81 @@ namespace DenGateway.Service.Tests;
 
 public sealed class ChannelActivityEventRouterTests
 {
+    private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+
     [Fact]
-    public async Task ActivityRoutePostsToChannelsWithoutCreatingDeliveryRequests()
+    public async Task ActivityRoutePreservesHermesPluginDisplayBlockPayloadsWithoutCreatingDeliveryRequestsOrWakes()
     {
         var databasePath = CreateTempDatabasePath();
         var channels = new RecordingChannelsClient();
         await using var factory = NewFactory(databasePath, channels);
         using var client = factory.CreateClient();
 
-        using var response = await client.PostAsJsonAsync("/api/channel-activity-events", new
+        var coderPayload = new
         {
             channelId = "42",
             projectId = "den-channels",
-            agentIdentity = "den-mcp-runner",
-            deliveryRequestId = "delivery-1527",
-            displayBlockId = "display-block-parent-1564",
-            hermesSessionKey = "session-1527",
-            parentHermesSessionKey = "parent-session-1564",
-            parentAgentIdentity = "parent-agent",
-            workerRunId = "worker-run-1564",
+            agentIdentity = "den-coder-profile",
+            deliveryRequestId = "coder-1567",
+            displayBlockId = "parent-1567",
+            hermesSessionKey = "session-coder-1567",
+            parentHermesSessionKey = "session-parent-1567",
+            parentAgentIdentity = "den-mcp-runner",
+            workerRunId = "coder-1567",
             workerRole = "coder",
-            taskId = 1527,
-            threadId = 6448,
-            anchorMessageId = 101,
+            taskId = 1567,
+            threadId = 7001,
+            anchorMessageId = 9001,
             eventType = "tool_call_started",
             status = "started",
             sequence = 1,
             title = "terminal",
             summary = "dotnet test",
-            dedupeKey = "activity:delivery-1527:1"
-        });
+            previewJson = "{\"command\":\"dotnet test\"}",
+            metadataJson = "{\"phase\":\"coder\"}",
+            dedupeKey = "activity:coder-1567:1"
+        };
+        var reviewerPayload = new
+        {
+            channelId = "42",
+            projectId = "den-channels",
+            agentIdentity = "den-reviewer-profile",
+            deliveryRequestId = "reviewer-1567",
+            displayBlockId = "parent-1567",
+            hermesSessionKey = "session-reviewer-1567",
+            parentHermesSessionKey = "session-parent-1567",
+            parentAgentIdentity = "den-mcp-runner",
+            workerRunId = "reviewer-1567",
+            workerRole = "reviewer",
+            taskId = 1567,
+            threadId = 7001,
+            anchorMessageId = 9001,
+            eventType = "review_started",
+            status = "started",
+            sequence = 2,
+            title = "review",
+            summary = "fake E2E reviewer activity",
+            previewJson = "{\"round\":1}",
+            metadataJson = "{\"phase\":\"reviewer\"}",
+            dedupeKey = "activity:reviewer-1567:2"
+        };
 
-        response.EnsureSuccessStatusCode();
-        var result = await response.Content.ReadFromJsonAsync<ActivityRoutePayload>();
-        Assert.NotNull(result);
-        Assert.Equal("recorded", result.Status);
-        Assert.True(result.Recorded);
-        Assert.Equal("activity-99", result.ActivityEventId);
-        var write = Assert.Single(channels.ActivityEvents);
-        Assert.Equal("42", write.ChannelId);
-        Assert.Equal("delivery-1527", write.DeliveryRequestId);
-        Assert.Equal("display-block-parent-1564", write.DisplayBlockId);
-        Assert.Equal("session-1527", write.HermesSessionKey);
-        Assert.Equal("parent-session-1564", write.ParentHermesSessionKey);
-        Assert.Equal("parent-agent", write.ParentAgentIdentity);
-        Assert.Equal("worker-run-1564", write.WorkerRunId);
-        Assert.Equal("coder", write.WorkerRole);
-        Assert.Equal("tool_call_started", write.EventType);
+        using var coderResponse = await client.PostAsJsonAsync("/api/channel-activity-events", coderPayload);
+        using var reviewerResponse = await client.PostAsJsonAsync("/api/channel-activity-events", reviewerPayload);
+
+        await AssertRecordedAsync(coderResponse);
+        await AssertRecordedAsync(reviewerResponse);
+        Assert.Collection(channels.ActivityEvents,
+            write => AssertActivityWriteMatchesGatewayPayload(coderPayload, write),
+            write => AssertActivityWriteMatchesGatewayPayload(reviewerPayload, write));
+        Assert.All(channels.ActivityEvents, write =>
+        {
+            Assert.Equal("parent-1567", write.DisplayBlockId);
+            Assert.NotEqual(write.DeliveryRequestId, write.DisplayBlockId);
+        });
         Assert.Equal(0, await CountDeliveriesAsync(databasePath));
+        Assert.Equal(0, await CountTableRowsAsync(databasePath, "delivery_attempts"));
+        Assert.Equal(0, await CountTableRowsAsync(databasePath, "sentinel_events"));
     }
 
     [Fact]
@@ -189,11 +218,43 @@ public sealed class ChannelActivityEventRouterTests
 
     private static async Task<int> CountDeliveriesAsync(string databasePath)
     {
+        return await CountTableRowsAsync(databasePath, "delivery_requests");
+    }
+
+    private static async Task<int> CountTableRowsAsync(string databasePath, string tableName)
+    {
         await using var connection = new SqliteConnection($"Data Source={databasePath}");
         await connection.OpenAsync();
         await using var command = connection.CreateCommand();
-        command.CommandText = "SELECT COUNT(*) FROM delivery_requests;";
+        command.CommandText = $"SELECT COUNT(*) FROM {tableName};";
         return Convert.ToInt32(await command.ExecuteScalarAsync());
+    }
+
+    private static async Task AssertRecordedAsync(HttpResponseMessage response)
+    {
+        response.EnsureSuccessStatusCode();
+        var result = await response.Content.ReadFromJsonAsync<ActivityRoutePayload>();
+        Assert.NotNull(result);
+        Assert.Equal("recorded", result.Status);
+        Assert.True(result.Recorded);
+        Assert.Equal("activity-99", result.ActivityEventId);
+    }
+
+    private static void AssertActivityWriteMatchesGatewayPayload<T>(T expectedPayload, ChannelActivityEventWrite actual)
+    {
+        var expected = JsonSerializer.SerializeToNode(expectedPayload, JsonOptions)?.AsObject();
+        var serializedActual = JsonSerializer.SerializeToNode(actual, JsonOptions)?.AsObject();
+        Assert.NotNull(expected);
+        Assert.NotNull(serializedActual);
+        Assert.False(expected.ContainsKey("displayDeliveryRequestId"));
+        Assert.False(serializedActual.ContainsKey("displayDeliveryRequestId"));
+        Assert.Equal(expected.Select(property => property.Key).Order(StringComparer.Ordinal),
+            serializedActual.Select(property => property.Key).Order(StringComparer.Ordinal));
+        foreach (var (key, expectedValue) in expected)
+        {
+            Assert.True(serializedActual.TryGetPropertyValue(key, out var actualValue), $"Missing activity payload field {key}.");
+            Assert.Equal(expectedValue?.ToJsonString(), actualValue?.ToJsonString());
+        }
     }
 
     private sealed class RecordingChannelsClient : IDenChannelsClient

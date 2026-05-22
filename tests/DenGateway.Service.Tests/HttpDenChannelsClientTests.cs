@@ -310,32 +310,35 @@ public class HttpDenChannelsClientTests
             var body = await request.Content!.ReadFromJsonAsync<Dictionary<string, object?>>(cancellationToken);
             Assert.NotNull(body);
             Assert.Equal("den-channels", body["projectId"]?.ToString());
-            Assert.Equal("den-mcp-runner", body["agentIdentity"]?.ToString());
-            Assert.Equal("delivery-1527", body["deliveryRequestId"]?.ToString());
-            Assert.Equal("display-block-1564", body["displayBlockId"]?.ToString());
-            Assert.Equal("session-1527", body["hermesSessionKey"]?.ToString());
-            Assert.Equal("parent-session-1564", body["parentHermesSessionKey"]?.ToString());
-            Assert.Equal("parent-agent", body["parentAgentIdentity"]?.ToString());
-            Assert.Equal("worker-run-1564", body["workerRunId"]?.ToString());
+            Assert.Equal("den-coder-profile", body["agentIdentity"]?.ToString());
+            Assert.Equal("coder-1567", body["deliveryRequestId"]?.ToString());
+            Assert.Equal("parent-1567", body["displayBlockId"]?.ToString());
+            Assert.Equal("session-coder-1567", body["hermesSessionKey"]?.ToString());
+            Assert.Equal("session-parent-1567", body["parentHermesSessionKey"]?.ToString());
+            Assert.Equal("den-mcp-runner", body["parentAgentIdentity"]?.ToString());
+            Assert.Equal("coder-1567", body["workerRunId"]?.ToString());
             Assert.Equal("coder", body["workerRole"]?.ToString());
+            Assert.Equal("1567", body["taskId"]?.ToString());
             Assert.Equal("tool_call_started", body["eventType"]?.ToString());
-            Assert.Equal("activity:delivery-1527:1", body["dedupeKey"]?.ToString());
+            Assert.Equal("activity:coder-1567:1", body["dedupeKey"]?.ToString());
+            Assert.False(body.ContainsKey("channelId"));
             Assert.False(body.ContainsKey("displayDeliveryRequestId"));
+            Assert.NotEqual(body["deliveryRequestId"]?.ToString(), body["displayBlockId"]?.ToString());
             return Json(new { id = 99, status = "started" }, HttpStatusCode.Created);
         });
 
         var result = await client.PostActivityEventAsync(new ChannelActivityEventWrite(
             ChannelId: "42",
             ProjectId: "den-channels",
-            AgentIdentity: "den-mcp-runner",
-            DeliveryRequestId: "delivery-1527",
-            DisplayBlockId: "display-block-1564",
-            HermesSessionKey: "session-1527",
-            ParentHermesSessionKey: "parent-session-1564",
-            ParentAgentIdentity: "parent-agent",
-            WorkerRunId: "worker-run-1564",
+            AgentIdentity: "den-coder-profile",
+            DeliveryRequestId: "coder-1567",
+            DisplayBlockId: "parent-1567",
+            HermesSessionKey: "session-coder-1567",
+            ParentHermesSessionKey: "session-parent-1567",
+            ParentAgentIdentity: "den-mcp-runner",
+            WorkerRunId: "coder-1567",
             WorkerRole: "coder",
-            TaskId: 1527,
+            TaskId: 1567,
             ThreadId: 6448,
             AnchorMessageId: 101,
             EventType: "tool_call_started",
@@ -345,7 +348,7 @@ public class HttpDenChannelsClientTests
             Summary: "dotnet test",
             PreviewJson: "{}",
             MetadataJson: "{}",
-            DedupeKey: "activity:delivery-1527:1"));
+            DedupeKey: "activity:coder-1567:1"));
 
         Assert.True(result.IsAvailable);
         Assert.Equal("99", result.ActivityEventId);

@@ -48,6 +48,18 @@ Activity routing is deliberately separate from the delivery loop and delivery ca
 
 Activity is observability. Final visible replies remain canonical completion evidence.
 
+## #1567 fake E2E coverage note
+
+Gateway has fixture-level coverage for parent display block `parent-1567` with child worker activity from `den-coder-profile`/`coder-1567` and `den-reviewer-profile`/`reviewer-1567`. The route test asserts the Hermes plugin's camelCase activity payload fields are preserved into the fake Channels client, `displayBlockId` is not conflated with `deliveryRequestId`, no `displayDeliveryRequestId` field is introduced, and activity routing creates no Gateway delivery rows, delivery attempts, or sentinel wake events.
+
+Validation commands:
+
+```bash
+dotnet test DenGateway.slnx --filter "ChannelActivityEventRouterTests|HttpDenChannelsClientTests"
+dotnet test DenGateway.slnx
+git diff --check
+```
+
 ## Failure behavior
 
 Activity persistence failures are **soft failures**:

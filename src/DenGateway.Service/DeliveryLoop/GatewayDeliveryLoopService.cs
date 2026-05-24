@@ -325,8 +325,15 @@ public sealed class GatewayDeliveryLoopService
 
     private static string? TryGetDirectAgentTargetIdentity(ChannelEventSnapshot channelEvent, ChannelMessageSnapshot? message)
     {
-        var sourceKind = message?.SourceKind ?? channelEvent.SourceKind;
-        var sourceId = message?.SourceId ?? channelEvent.SourceId;
+        // Use the channel event's SourceKind/SourceId as the authoritative
+        // routing metadata. The event carries the wake- or direct-agent routing
+        // decision, while the message content may have a different SourceKind
+        // (e.g. "channel_message" for a human text payload posted into a
+        // wake-event stream). Relying on message.SourceKind would miss the
+        // direct-agent target when the message body lacks an @mention and the
+        // target membership has a mentions_only wake policy.
+        var sourceKind = channelEvent.SourceKind;
+        var sourceId = channelEvent.SourceId;
         if (!string.Equals(sourceKind, "wake_event", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(sourceKind, "direct_agent_message", StringComparison.OrdinalIgnoreCase))
         {

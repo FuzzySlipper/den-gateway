@@ -266,6 +266,52 @@ public class DeliveryLoopTests
     }
 
     [Fact]
+    public async Task DirectAgentEncodedTargetCreatesWakeWhenMessageSourceKindDiffersFromEvent()
+    {
+        // Real-world scenario: the channel event correctly carries
+        // SourceKind="wake_event" and the direct-agent-message sourceId,
+        // but the channel message content has SourceKind="channel_message"
+        // (because the human text message was originally posted as a regular
+        // channel message). The Gateway must prefer the event's routing
+        // metadata to resolve the encoded target identity. Without this fix,
+        // TryGetDirectAgentTargetIdentity would use the message's
+        // "channel_message" SourceKind, return null, and the mentions_only
+        // policy would suppress the delivery since the body lacks @mention.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot("805", "message_created", "4", "wake_event", "direct-agent-message:4:den-mcp-runner:1779610424738", "channel-message:805", DateTimeOffset.Parse("2026-05-20T10:00:00Z"))
+            ],
+            MessagesById = new Dictionary<string, ChannelMessageSnapshot>
+            {
+                ["805"] = new ChannelMessageSnapshot("805", "4", "user", "Patch", "human_text", "Please handle this task", "channel_message", "805", "channel-message:805", DateTimeOffset.Parse("2026-05-20T10:00:00Z"))
+            },
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("4", "agent", "den-mcp-runner", "mentions_only", "active", 60, new Dictionary<string, string>()),
+                new ChannelMembershipSnapshot("4", "agent", "reviewer", "mentions_only", "active", 60, new Dictionary<string, string>()),
+                new ChannelMembershipSnapshot("4", "agent", "sysadmin", "mentions_only", "active", 60, new Dictionary<string, string>())
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(Source: "channels", ProjectId: null, Limit: 10, Now: DateTimeOffset.Parse("2026-05-20T10:01:00Z"), ChannelId: "4"));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(1, result.SeenCount);
+        Assert.Equal(1, result.CreatedCount);
+        Assert.Equal(2, result.SuppressedCount);
+        var row = await ReadSingleDeliveryAsync(databasePath);
+        Assert.Equal("den-mcp-runner", row.TargetIdentity);
+        Assert.Equal("wake", row.DeliveryMode);
+        Assert.Contains("direct_agent_target", row.MetadataJson);
+    }
+
+    [Fact]
     public async Task AmbiguousLegacyDirectAgentWakeEventDoesNotBypassMentionsOnly()
     {
         var databasePath = CreateTempDatabasePath();

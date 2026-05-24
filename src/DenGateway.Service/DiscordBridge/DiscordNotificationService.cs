@@ -47,7 +47,7 @@ public sealed class DiscordNotificationService
         var (body, bodyTruncated) = TruncateBody(request.Body, options.MaxBodyLength);
 
         // 3. Build Discord payload
-        var content = BuildDiscordContent(body, request);
+        var content = BuildDiscordContent(body, request, target);
         var allowedMentions = BuildAllowedMentions(target);
 
         // 4. Dry run: return the rendered payload without sending
@@ -170,8 +170,8 @@ public sealed class DiscordNotificationService
         return (body[..(maxLength - 3)] + "...", true);
     }
 
-    /// <summary>Build the content string with source attribution.</summary>
-    private static string BuildDiscordContent(string body, DiscordNotificationRequest request)
+    /// <summary>Build the content string with source attribution and optional mention prefix.</summary>
+    private static string BuildDiscordContent(string body, DiscordNotificationRequest request, DiscordBridgeTarget target)
     {
         var header = $"🔔 **Notification from {request.Requester}**";
         if (!string.IsNullOrWhiteSpace(request.SourceProjectId))
@@ -187,7 +187,16 @@ public sealed class DiscordNotificationService
             ? $"\n*Source: channel {request.SourceChannelId}, message {request.SourceMessageId}*"
             : $"\n*Source: message {request.SourceMessageId}*";
 
-        return $"{header}{urgencyLine}\n\n{body}{sourceLine}";
+        var content = $"{header}{urgencyLine}\n\n{body}{sourceLine}";
+
+        // Prepend a Discord-native mention token when WakeByMention is true and a user is configured.
+        // This creates the actual ping; allowed_mentions only permits it, it does not generate the token.
+        if (target.WakeByMention && !string.IsNullOrWhiteSpace(target.MentionUserId))
+        {
+            content = $"<@{target.MentionUserId}> {content}";
+        }
+
+        return content;
     }
 
     /// <summary>Build allowed_mentions with deliberate scope: only configured target user when WakeByMention=true.</summary>

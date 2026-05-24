@@ -82,8 +82,8 @@ DenGateway__DiscordBridge__Targets__den-coder-profile__WakeByMention=true
 |---|---|---|
 | `ChannelId` | string | Discord channel ID to post into. Required. |
 | `ThreadId` | string? | Optional thread ID within the channel. |
-| `MentionUserId` | string? | Discord user ID to mention when `WakeByMention=true`. |
-| `WakeByMention` | bool | When `true`, includes a targeted mention of `MentionUserId`. When `false`, all mentions are suppressed. |
+| `MentionUserId` | string? | Discord user ID to mention when `WakeByMention=true`. When set, the bridge inserts `<@userId>` into the message content to create a real Discord notification/ping. |
+| `WakeByMention` | bool | When `true`, includes a targeted Discord mention token (`<@MentionUserId>`) in the message content and configures `allowed_mentions` to permit only that user. When `false`, no mention token is inserted and all mentions are suppressed via `allowed_mentions`. |
 
 ## API
 
@@ -137,7 +137,7 @@ Submit a notification request.
   "dry_run_payload": {
     "discord_channel_id": "1345678901234567890",
     "discord_thread_id": null,
-    "content": "🔔 **test-runner** (project: den-gateway)\n\n**Urgency**: high\n\nYou have a new priority review request in project `den-gateway`.\n*Source: channel source-channel-abc, message source-message-xyz*",
+    "content": "<@987654321098765432> 🔔 **test-runner** (project: den-gateway)\n\n**Urgency**: high\n\nYou have a new priority review request in project `den-gateway`.\n*Source: channel source-channel-abc, message source-message-xyz*",
     "allowed_mentions": {
       "parse": [],
       "users": ["987654321098765432"],
@@ -203,8 +203,8 @@ Submit a notification request.
 
 ### Mention policy
 
-- `WakeByMention=true` + `MentionUserId` set: only that user is mentioned. `@everyone`, `@here`, and role mentions are suppressed via `allowed_mentions.parse=[]`.
-- `WakeByMention=false`: no mentions at all. `allowed_mentions.users=[]`.
+- `WakeByMention=true` + `MentionUserId` set: the bridge inserts `<@MentionUserId>` into the message content to create a real Discord notification/ping, and `allowed_mentions` restricts to only that user. `@everyone`, `@here`, and role mentions are suppressed via `allowed_mentions.parse=[]`.
+- `WakeByMention=false`: no mention token is inserted into the content, and `allowed_mentions.users=[]` suppresses all mentions.
 
 ### Secret safety
 

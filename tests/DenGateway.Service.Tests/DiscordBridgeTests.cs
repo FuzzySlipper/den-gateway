@@ -120,6 +120,9 @@ public class DiscordBridgeNotificationServiceTests
         Assert.Empty(payload.AllowedMentions.Parse);
         Assert.Contains("222222222222222222", payload.AllowedMentions.Users);
 
+        // Content should contain the actual Discord mention token when WakeByMention=true
+        Assert.Contains("<@222222222222222222>", payload.Content);
+
         // No notification record was created (dry run doesn't persist)
         Assert.Null(result.NotificationId);
     }
@@ -136,6 +139,9 @@ public class DiscordBridgeNotificationServiceTests
         Assert.NotNull(result.DryRunPayload);
         Assert.Equal("555555555555555555", result.DryRunPayload.DiscordChannelId);
         Assert.Equal("666666666666666666", result.DryRunPayload.DiscordThreadId);
+
+        // Content should contain the mention token for the thread target
+        Assert.Contains("<@777777777777777777>", result.DryRunPayload.Content);
     }
 
     [Fact]
@@ -198,6 +204,9 @@ public class DiscordBridgeNotificationServiceTests
         Assert.Single(mentions.Users);
         Assert.Equal("222222222222222222", mentions.Users[0]);
         Assert.Empty(mentions.Roles);
+
+        // Content should contain the actual Discord mention token
+        Assert.Contains("<@222222222222222222>", result.DryRunPayload.Content);
     }
 
     [Fact]
@@ -213,6 +222,9 @@ public class DiscordBridgeNotificationServiceTests
         Assert.Empty(mentions.Parse);
         Assert.Empty(mentions.Users);
         Assert.Empty(mentions.Roles);
+
+        // Content should NOT contain any mention token when WakeByMention=false
+        Assert.DoesNotContain("<@", result.DryRunPayload.Content);
     }
 
     [Fact]

@@ -117,6 +117,10 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
 
     public async Task<ClientOperationResult> PostMirrorOrSystemMessageAsync(ChannelMirrorMessage message, CancellationToken cancellationToken = default)
     {
+        // Channels keeps /api/gateway/system-messages as the compatibility route name.
+        // In communication-surface terms this posts a Gateway-generated channel_message;
+        // gateway_delivery final replies must use this path only for the terminal visible
+        // reply, while interim progress goes through channel activity events.
         var request = new PostGatewaySystemMessageRequest(
             ChannelId: long.TryParse(message.ChannelId, out var channelId) ? channelId : null,
             ProjectId: long.TryParse(message.ChannelId, out _) ? null : message.ChannelId,
@@ -134,10 +138,10 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
         var response = await _httpClient.PostAsJsonAsync("/api/gateway/system-messages", request, JsonOptions, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
-            return ClientOperationResult.Unavailable($"http_{(int)response.StatusCode}", "Den Channels system-message post failed.");
+            return ClientOperationResult.Unavailable($"http_{(int)response.StatusCode}", "Den Channels Gateway-generated channel-message post failed.");
         }
 
-        return ClientOperationResult.Completed("Den Channels accepted the Gateway system/mirror message.");
+        return ClientOperationResult.Completed("Den Channels accepted the Gateway-generated channel message.");
     }
 
     public async Task<ChannelActivityPostResult> PostActivityEventAsync(ChannelActivityEventWrite activityEvent,

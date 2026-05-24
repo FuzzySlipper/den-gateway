@@ -22,6 +22,19 @@ Not owned by `den-gateway` v1:
 - Hermes runtime implementation;
 - direct reads/writes of `den-mcp` or `den-channels` SQLite databases.
 
+## Communication-surface naming
+
+Task #1555 aligns Gateway terminology with Core/Channels contracts:
+
+- `delivery_request` and `delivery_attempt` are Gateway control-plane records. They are not channel transcript messages and not durable Core task messages.
+- `channel_message` is the Channels transcript surface. Gateway may observe or write one through Channels APIs, but Channels owns it.
+- `direct_agent_message` is the Channels/Gateway wakeable member-targeted request; Gateway should treat it as an explicit target signal, not as ambient channel scrollback fanout.
+- `delivery_activity_event` / `channel_activity_event` is non-waking progress/observability for an in-flight delivery.
+- `gateway_delivery_final_message` is the final visible transcript reply associated with a delivery. It should use `sourceKind=gateway_delivery` and final dedupe semantics such as `gateway-delivery:{delivery_request_id}:final`.
+- Core `project_message` / `task_message`, `user_notification`, `agent_stream_entry`, and worker/review packets remain Core-owned surfaces that Gateway may route from or link to, but must not re-label as generic messages.
+
+New Gateway API/docs should qualify "message" with the owning surface unless the route/DTO namespace already does so.
+
 ## Repo and service shape
 
 Initial layout:

@@ -1,6 +1,6 @@
 # Gateway routing for Channels activity events (#1527)
 
-Den Gateway accepts agent activity/breadcrumb events and forwards them to the Den Channels activity API introduced by #1526.
+Den Gateway accepts agent activity/breadcrumb events and forwards them to the Den Channels activity API introduced by #1526. In the task #1555 communication vocabulary, this route writes `delivery_activity_event` / `channel_activity_event` records. It does not write `channel_message` rows and it does not produce a `gateway_delivery_final_message`.
 
 ## Contract
 
@@ -46,7 +46,7 @@ Activity routing is deliberately separate from the delivery loop and delivery ca
 - It does not touch final delivery dedupe handles.
 - It does not call delivered/ack/fail/complete/expire callbacks.
 
-Activity is observability. Final visible replies remain canonical completion evidence.
+Activity is observability. Final visible replies remain canonical completion evidence and should be named `gateway_delivery_final_message` in cross-service docs.
 
 ## #1567 fake E2E coverage note
 

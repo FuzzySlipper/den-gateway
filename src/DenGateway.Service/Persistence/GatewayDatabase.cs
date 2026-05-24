@@ -41,6 +41,8 @@ public sealed class GatewayDatabase
         await EnsureColumnAsync(connection, "delivery_attempts", "external_message_id", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "delivery_attempts", "session_id", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "delivery_attempts", "observed_at", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(connection, "discord_notifications", "dedupe_key", "TEXT NOT NULL UNIQUE", cancellationToken);
+        await EnsureColumnAsync(connection, "discord_notification_attempts", "notification_id", "INTEGER NOT NULL", cancellationToken);
         await SeedSentinelStateAsync(connection, cancellationToken);
     }
 
@@ -853,7 +855,45 @@ public sealed class GatewayDatabase
         "CREATE INDEX IF NOT EXISTS idx_delivery_requests_target ON delivery_requests(target_type, target_identity);",
         "CREATE INDEX IF NOT EXISTS idx_delivery_requests_project ON delivery_requests(project_id);",
         "CREATE INDEX IF NOT EXISTS idx_gateway_adapter_bindings_status ON gateway_adapter_bindings(status);",
-        "CREATE INDEX IF NOT EXISTS idx_sentinel_events_reconciled ON sentinel_events(reconciled_at);"
+        "CREATE INDEX IF NOT EXISTS idx_sentinel_events_reconciled ON sentinel_events(reconciled_at);",
+        """
+        CREATE TABLE IF NOT EXISTS discord_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dedupe_key TEXT NOT NULL UNIQUE,
+            target_agent_identity TEXT NOT NULL,
+            body TEXT NOT NULL,
+            body_truncated INTEGER NOT NULL DEFAULT 0,
+            source_channel_id TEXT NOT NULL,
+            source_message_id TEXT NOT NULL,
+            source_project_id TEXT NULL,
+            requester TEXT NOT NULL,
+            urgency TEXT NULL,
+            discord_channel_id TEXT NULL,
+            discord_thread_id TEXT NULL,
+            mention_user_id TEXT NULL,
+            wake_by_mention INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        );
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS discord_notification_attempts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            notification_id INTEGER NOT NULL REFERENCES discord_notifications(id) ON DELETE CASCADE,
+            attempt_number INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            discord_message_id TEXT NULL,
+            error_code TEXT NULL,
+            error_message TEXT NULL,
+            payload_json TEXT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(notification_id, attempt_number)
+        );
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_discord_notifications_dedupe ON discord_notifications(dedupe_key);",
+        "CREATE INDEX IF NOT EXISTS idx_discord_notifications_target ON discord_notifications(target_agent_identity, status);",
+        "CREATE INDEX IF NOT EXISTS idx_discord_notification_attempts_notif ON discord_notification_attempts(notification_id);"
     ];
 }
 

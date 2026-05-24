@@ -2,6 +2,7 @@ using DenGateway.Service.Activity;
 using DenGateway.Service.Bindings;
 using DenGateway.Service.Clients;
 using DenGateway.Service.DeliveryLoop;
+using DenGateway.Service.DiscordBridge;
 using DenGateway.Service.Persistence;
 using Microsoft.Extensions.Options;
 using System.Text.Json.Serialization;
@@ -22,6 +23,28 @@ builder.Services.AddSingleton<ChannelActivityEventRouter>();
 builder.Services.AddSingleton<GatewayDeliveryLoopService>();
 builder.Services.AddSingleton<GatewayChannelProjectDiscoveryService>();
 builder.Services.AddHostedService<GatewayDeliveryLoopHostedService>();
+
+builder.Services.AddOptions<DiscordBridgeOptions>()
+    .Bind(builder.Configuration.GetSection(DiscordBridgeOptions.SectionName))
+    .ValidateOnStart();
+
+builder.Services.AddSingleton<DiscordNotificationRepository>(sp =>
+{
+    var dbPath = sp.GetRequiredService<IOptions<DenGatewayOptions>>().Value.Database.Path;
+    return new DiscordNotificationRepository(dbPath);
+});
+
+builder.Services.AddHttpClient("DiscordApi", client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(15);
+})
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+    {
+        AllowAutoRedirect = false
+    });
+
+builder.Services.AddSingleton<DiscordApiClient>();
+builder.Services.AddSingleton<DiscordNotificationService>();
 
 if (configuredOptions.DenCore.UseStub)
 {
@@ -211,6 +234,27 @@ app.MapGet("/api/binding-snapshots", async (BindingSnapshotService bindingSnapsh
     var items = await bindingSnapshots.ListAsync(observedAt, cancellationToken);
     var health = await bindingSnapshots.GetHealthAsync(observedAt, cancellationToken);
     return Results.Ok(new BindingSnapshotListResponse(items, health));
+});
+
+app.MapPost("/api/discord-bridge/notifications", async (
+    DiscordNotificationService notificationService,
+    DiscordNotificationRequest request,
+    CancellationToken cancellationToken) =>
+{
+    if (!DiscordNotificationService.ValidateRequest(request, out var validationError))
+    {
+        return Results.BadRequest(new DiscordNotificationResponse(
+            Status: "validation_error",
+            Error: validationError));
+    }
+
+    var result = await notificationService.NotifyAsync(request, cancellationToken);
+    return result.Status switch
+    {
+        "rejected" => Results.BadRequest(result),
+        "validation_error" => Results.BadRequest(result),
+        _ => Results.Ok(result)
+    };
 });
 
 app.Run();

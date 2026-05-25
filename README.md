@@ -142,5 +142,5 @@ If Kestrel chooses a different development URL, use the URL printed by `dotnet r
 - Do not depend on being inside the `den-mcp` repo.
 - Do not read/write `den-mcp` or `den-channels` SQLite databases directly.
 - Consume Den Core and Den Channels through explicit HTTP/event contracts.
-- When a new Den Core capability is needed, create a task in the `den-mcp` Den project instead of editing that repo from here.
+- When a new canonical Den state/API capability is needed, create a task in the owning `den-core` Den project instead of routing it through the historical `den-mcp` project.
 - Keep Hermes-specific delivery mechanics in a thin bridge/adapter; Gateway owns routing and delivery state.

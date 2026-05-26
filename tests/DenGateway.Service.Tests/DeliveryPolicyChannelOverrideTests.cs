@@ -213,7 +213,7 @@ public class DeliveryPolicyChannelOverrideTests
         // compute the flag. For this test's purpose, the flag being true but
         // the override saying cooldown is disabled means the upstream should
         // never set the flag to true.
-        // 
+        //
         // Practically, TargetCooldownSeconds=0 means the upstream evaluator
         // would compute TargetInCooldown=false for any cooldown > 0 elapsed.
         // The bool flag is the pre-computed result; the config controls the

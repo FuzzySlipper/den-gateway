@@ -1,6 +1,7 @@
 using DenGateway.Service.Activity;
 using DenGateway.Service.Bindings;
 using DenGateway.Service.Clients;
+using DenGateway.Service.Deliveries;
 using DenGateway.Service.DeliveryLoop;
 using DenGateway.Service.DiscordBridge;
 using DenGateway.Service.Persistence;
@@ -26,6 +27,10 @@ builder.Services.AddHostedService<GatewayDeliveryLoopHostedService>();
 
 builder.Services.AddOptions<DiscordBridgeOptions>()
     .Bind(builder.Configuration.GetSection(DiscordBridgeOptions.SectionName))
+    .ValidateOnStart();
+
+builder.Services.AddOptions<DeliveryPolicyOptions>()
+    .Bind(builder.Configuration.GetSection(DeliveryPolicyOptions.SectionName))
     .ValidateOnStart();
 
 builder.Services.AddSingleton<DiscordNotificationRepository>(sp =>

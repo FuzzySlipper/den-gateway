@@ -243,25 +243,12 @@ public sealed class GatewayDeliveryLoopService
                 var policyDecision = DeliveryPolicy.Evaluate(deliveryInput, _policyOptions);
                 if (!policyDecision.ShouldDeliver)
                 {
-                    suppressed++;
-                    continue;
-                }
-
-                var create = await _database.CreateDeliveryRequestAsync(new DeliveryCreateRequest(
-                    SourceKind: channelEvent.SourceKind,
-                    SourceId: channelEvent.SourceId,
-                    SourceProjectId: projectId,
-                    TargetType: targetType,
-                    TargetIdentity: membership.MemberIdentity,
-                    ProjectId: membership.Settings.TryGetValue("projectId", out var memberProjectId) && !string.IsNullOrWhiteSpace(memberProjectId) ? memberProjectId : projectId,
-                    TaskId: null,
-                    ChannelId: channelEvent.ChannelId,
-                    DeliveryMode: deliveryDecision.DeliveryMode,
-                    Priority: 3,
-                    Reason: channelEvent.EventType,
-                    ContextSummary: message?.Body ?? $"Channel event {channelEvent.SourceId}",
-                    ContextLink: $"den://channel/{channelEvent.ChannelId}/message/{channelEvent.Cursor}",
-                    MetadataJson: JsonSerializer.Serialize(new Dictionary<string, object?>
+                    // Insert a durable suppressed row for diagnostics instead of
+                    // silently incrementing the counter. Same dedupe/source/target/
+                    // context metadata as a pending row, with Status='suppressed'
+                    // and metadata recording the policy decision details.
+                    var suppressedDedupeKey = $"suppressed:{dedupeKey}:{policyDecision.SuppressionReason ?? "unknown"}";
+                    var suppressedMetadata = new Dictionary<string, object?>
                     {
                         ["source"] = "channels",
                         ["cursor"] = channelEvent.Cursor,
@@ -272,8 +259,75 @@ public sealed class GatewayDeliveryLoopService
                         ["sender_identity"] = message?.SenderIdentity,
                         ["wake_policy"] = membership.WakePolicy,
                         ["direct_agent_target"] = directAgentTargetIdentity,
-                        ["cascade_depth"] = cascadeDepth
-                    }, JsonOptions),
+                        ["cascade_depth"] = cascadeDepth,
+                        ["applied_policy_label"] = policyDecision.AppliedPolicyLabel,
+                        ["applied_override_key"] = policyDecision.AppliedOverrideKey
+                    };
+                    var suppressedCreate = await _database.CreateDeliveryRequestAsync(new DeliveryCreateRequest(
+                        SourceKind: channelEvent.SourceKind,
+                        SourceId: channelEvent.SourceId,
+                        SourceProjectId: projectId,
+                        TargetType: targetType,
+                        TargetIdentity: membership.MemberIdentity,
+                        ProjectId: membership.Settings.TryGetValue("projectId", out var memberProjectId) && !string.IsNullOrWhiteSpace(memberProjectId) ? memberProjectId : projectId,
+                        TaskId: null,
+                        ChannelId: channelEvent.ChannelId,
+                        DeliveryMode: deliveryDecision.DeliveryMode,
+                        Priority: 3,
+                        Reason: channelEvent.EventType,
+                        ContextSummary: message?.Body ?? $"Channel event {channelEvent.SourceId}",
+                        ContextLink: $"den://channel/{channelEvent.ChannelId}/message/{channelEvent.Cursor}",
+                        MetadataJson: JsonSerializer.Serialize(suppressedMetadata, JsonOptions),
+                        Status: "suppressed",
+                        SuppressionReason: policyDecision.SuppressionReason,
+                        DedupeKey: suppressedDedupeKey,
+                        CascadeDepth: cascadeDepth,
+                        NextAttemptAt: null,
+                        ExpiresAt: null,
+                        CreatedAt: now
+                    ), cancellationToken);
+
+                    if (suppressedCreate.AlreadyExisted)
+                    {
+                        duplicates++;
+                    }
+                    else
+                    {
+                        suppressed++;
+                    }
+                    continue;
+                }
+
+                var channelMetadata = new Dictionary<string, object?>
+                {
+                    ["source"] = "channels",
+                    ["cursor"] = channelEvent.Cursor,
+                    ["event_type"] = channelEvent.EventType,
+                    ["channel_id"] = channelEvent.ChannelId,
+                    ["message_kind"] = message?.MessageKind,
+                    ["sender_type"] = message?.SenderType,
+                    ["sender_identity"] = message?.SenderIdentity,
+                    ["wake_policy"] = membership.WakePolicy,
+                    ["direct_agent_target"] = directAgentTargetIdentity,
+                    ["cascade_depth"] = cascadeDepth,
+                    ["applied_policy_label"] = policyDecision.AppliedPolicyLabel,
+                    ["applied_override_key"] = policyDecision.AppliedOverrideKey
+                };
+                var create = await _database.CreateDeliveryRequestAsync(new DeliveryCreateRequest(
+                    SourceKind: channelEvent.SourceKind,
+                    SourceId: channelEvent.SourceId,
+                    SourceProjectId: projectId,
+                    TargetType: targetType,
+                    TargetIdentity: membership.MemberIdentity,
+                    ProjectId: membership.Settings.TryGetValue("projectId", out var memberProjectId2) && !string.IsNullOrWhiteSpace(memberProjectId2) ? memberProjectId2 : projectId,
+                    TaskId: null,
+                    ChannelId: channelEvent.ChannelId,
+                    DeliveryMode: deliveryDecision.DeliveryMode,
+                    Priority: 3,
+                    Reason: channelEvent.EventType,
+                    ContextSummary: message?.Body ?? $"Channel event {channelEvent.SourceId}",
+                    ContextLink: $"den://channel/{channelEvent.ChannelId}/message/{channelEvent.Cursor}",
+                    MetadataJson: JsonSerializer.Serialize(channelMetadata, JsonOptions),
                     Status: "pending",
                     SuppressionReason: null,
                     DedupeKey: dedupeKey,
@@ -424,9 +478,15 @@ public sealed class GatewayDeliveryLoopService
     /// <summary>
     /// Detect agent-originated message without evidence of a human in the loop.
     /// When the sender is an agent (not user/human_text), this is conservatively
-    /// treated as agent-tennis requiring a human reset. The DeliveryPolicy
-    /// evaluate method will apply the configured brakes; the agent-tennis-test
-    /// override can relax this via AgentTennisWithoutHumanResetEnabled=false.
+    /// treated as agent-tennis requiring a human reset.
+    ///
+    /// This method is intentionally a conservative proxy rather than tracking true
+    /// message-chain state, because the full conversation history and human-in-loop
+    /// status across multi-hop chains is not available at the Gateway delivery-loop
+    /// layer. The proxy flags any agent-sent message as potentially part of an
+    /// agent-tennis chain, then delegates to DeliveryPolicy to apply the configured
+    /// brakes. Channels with the AgentTennisWithoutHumanResetEnabled override
+    /// (e.g. agent-tennis-test) can relax this for controlled testing.
     /// </summary>
     private static bool IsAgentTennisWithoutHumanReset(ChannelMessageSnapshot? message)
     {

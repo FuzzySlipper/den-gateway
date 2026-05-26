@@ -1,4 +1,5 @@
 using System.Net.Http.Json;
+using System.Text.Json;
 using DenGateway.Service.Clients;
 using DenGateway.Service.Deliveries;
 using DenGateway.Service.DeliveryLoop;
@@ -826,7 +827,22 @@ public class DeliveryLoopTests
         Assert.Equal("completed", result.Status);
         Assert.Equal(0, result.CreatedCount);       // suppressed by agent-tennis brake
         Assert.Equal(2, result.SuppressedCount);     // sender skip (agent-b) + policy suppress (agent-a)
-        Assert.Equal(0, await CountDeliveriesAsync(databasePath));
+        // One suppressed diagnostic row is written to the database (for agent-a).
+        // The sender skip (agent-b) does not write a DB row.
+        var suppressedRows = await ReadDeliveriesAsync(databasePath);
+        var suppressedRow = Assert.Single(suppressedRows);
+        Assert.Equal("suppressed", suppressedRow.Status);
+        Assert.Equal("agent_tennis_requires_human_reset", suppressedRow.SuppressionReason);
+        Assert.Equal("agent-a", suppressedRow.TargetIdentity);
+        Assert.Equal("normal_channel", suppressedRow.ChannelId);
+        // Verify metadata includes policy decision fields
+        var metadata = JsonSerializer.Deserialize<Dictionary<string, object?>>(suppressedRow.MetadataJson);
+        Assert.NotNull(metadata);
+        Assert.Contains("applied_policy_label", metadata.Keys);
+        Assert.Null(metadata["applied_policy_label"]); // global defaults have no label
+        Assert.Null(metadata["applied_override_key"]);  // no override matched
+        Assert.Equal("normal_channel", metadata["channel_id"]?.ToString());
+        Assert.Equal("1", metadata["cascade_depth"]?.ToString());  // agent-sent message => depth 1
     }
 
     [Fact]
@@ -915,6 +931,12 @@ public class DeliveryLoopTests
         var row = await ReadSingleDeliveryAsync(databasePath);
         Assert.Equal("agent-a", row.TargetIdentity);
         Assert.Equal("wake", row.DeliveryMode);
+        // Verify pending delivery metadata includes policy decision metadata
+        var pendingMetadata = JsonSerializer.Deserialize<Dictionary<string, object?>>(row.MetadataJson);
+        Assert.NotNull(pendingMetadata);
+        Assert.Equal("agent-tennis-test-no-safeguards", pendingMetadata["applied_policy_label"]?.ToString());
+        Assert.Equal("agent-tennis-test", pendingMetadata["applied_override_key"]?.ToString());
+        Assert.Equal("ch_agent_tennis_test", pendingMetadata["channel_id"]?.ToString());
     }
 
     [Fact]
@@ -984,8 +1006,21 @@ public class DeliveryLoopTests
 
         Assert.Equal("completed", result.Status);
         Assert.Equal(0, result.CreatedCount);        // suppressed by global defaults
-        Assert.Equal(2, result.SuppressedCount);
-        Assert.Equal(0, await CountDeliveriesAsync(databasePath));
+        Assert.Equal(2, result.SuppressedCount);     // sender skip (agent-b) + policy suppress (agent-a)
+        // One suppressed diagnostic row written for agent-a
+        var supRows = await ReadDeliveriesAsync(databasePath);
+        var supRow = Assert.Single(supRows);
+        Assert.Equal("suppressed", supRow.Status);
+        Assert.Equal("agent_tennis_requires_human_reset", supRow.SuppressionReason);
+        Assert.Equal("agent-a", supRow.TargetIdentity);
+        Assert.Equal("normal_team_channel", supRow.ChannelId);
+        var supMeta = JsonSerializer.Deserialize<Dictionary<string, object?>>(supRow.MetadataJson);
+        Assert.NotNull(supMeta);
+        Assert.Contains("applied_policy_label", supMeta.Keys);
+        // Global defaults, no override matched — label is null
+        Assert.Null(supMeta["applied_policy_label"]);
+        Assert.Null(supMeta["applied_override_key"]);
+        Assert.Equal("normal_team_channel", supMeta["channel_id"]?.ToString());
     }
 
     private static string CreateTempDatabasePath()
@@ -1018,7 +1053,8 @@ public class DeliveryLoopTests
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT source_kind, source_id, target_type, target_identity, delivery_mode, status,
-                   dedupe_key, metadata_json, task_id, channel_id, context_summary, project_id
+                   dedupe_key, metadata_json, task_id, channel_id, context_summary, project_id,
+                   suppression_reason
             FROM delivery_requests
             ORDER BY id
             """;
@@ -1038,13 +1074,14 @@ public class DeliveryLoopTests
                 reader.IsDBNull(8) ? null : reader.GetInt32(8),
                 reader.IsDBNull(9) ? null : reader.GetString(9),
                 reader.IsDBNull(10) ? null : reader.GetString(10),
-                reader.IsDBNull(11) ? null : reader.GetString(11)));
+                reader.IsDBNull(11) ? null : reader.GetString(11),
+                reader.IsDBNull(12) ? null : reader.GetString(12)));
         }
 
         return rows;
     }
 
-    private sealed record DeliveryRow(string SourceKind, string? SourceId, string TargetType, string TargetIdentity, string DeliveryMode, string Status, string DedupeKey, string MetadataJson, int? TaskId, string? ChannelId, string? ContextSummary, string? ProjectId);
+    private sealed record DeliveryRow(string SourceKind, string? SourceId, string TargetType, string TargetIdentity, string DeliveryMode, string Status, string DedupeKey, string MetadataJson, int? TaskId, string? ChannelId, string? ContextSummary, string? ProjectId, string? SuppressionReason = null);
 
     private sealed class FakeDenCoreClient : IDenCoreClient
     {

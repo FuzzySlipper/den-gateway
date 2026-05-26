@@ -1,16 +1,26 @@
 using System.Net.Http.Json;
 using DenGateway.Service.Clients;
+using DenGateway.Service.Deliveries;
 using DenGateway.Service.DeliveryLoop;
 using DenGateway.Service.Persistence;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 
 namespace DenGateway.Service.Tests;
 
 public class DeliveryLoopTests
 {
+    // Relaxed policy options for tests with legitimate agent-to-agent messaging
+    // that is not an A->B->A tennis chain.
+    private static readonly DeliveryPolicyOptions RelaxedAgentPolicyOptions = new()
+    {
+        AgentTennisWithoutHumanResetEnabled = false
+    };
+
+    private static readonly IOptions<DeliveryPolicyOptions> RelaxedPolicy = Options.Create(RelaxedAgentPolicyOptions);
     [Fact]
     public async Task CoreOutboxEventIsPersistedAsOneGatewayDeliveryWithSourceSummaryMetadata()
     {
@@ -116,7 +126,7 @@ public class DeliveryLoopTests
                 new ChannelMembershipSnapshot("77", "agent", "quiet-agent", "record_only", "active", 0, new Dictionary<string, string> { ["projectId"] = "den-gateway" })
             ]
         };
-        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels, RelaxedPolicy);
 
         var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(Source: "channels", ProjectId: "den-gateway", Limit: 10, Now: DateTimeOffset.Parse("2026-05-14T03:06:00Z")));
 
@@ -759,6 +769,223 @@ public class DeliveryLoopTests
         Assert.Equal("completed", body.Status);
         Assert.Equal(1, body.CreatedCount);
         Assert.Equal(1, await CountDeliveriesAsync(databasePath));
+    }
+
+    // ===================================================================
+    // DeliveryPolicy integration tests (task #1687)
+    // ===================================================================
+
+    [Fact]
+    public async Task DefaultConfig_Suppresses_AgentTennisChain_ChannelOriginated()
+    {
+        // Simulate an A->B->A chain: agent-b sends a message in channel
+        // "normal_channel". With default DeliveryPolicyOptions, the
+        // agent-tennis brake (AgentTennisWithoutHumanResetEnabled=true)
+        // should suppress delivery to agent-a.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot(
+                    Cursor: "500",
+                    EventType: "message_created",
+                    ChannelId: "normal_channel",
+                    SourceKind: "channel_message",
+                    SourceId: "500",
+                    DedupeKey: "channel-message:500",
+                    OccurredAt: DateTimeOffset.Parse("2026-05-26T00:00:00Z"))
+            ],
+            Message = new ChannelMessageSnapshot(
+                ChannelMessageId: "500",
+                ChannelId: "normal_channel",
+                SenderType: "agent",
+                SenderIdentity: "agent-b",
+                MessageKind: "agent_text",
+                Body: "@agent-a please review",
+                SourceKind: "channel_message",
+                SourceId: "500",
+                DedupeKey: "channel-message:500",
+                CreatedAt: DateTimeOffset.Parse("2026-05-26T00:00:00Z")),
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("normal_channel", "agent", "agent-a", "wake", "active", 0, new Dictionary<string, string>()),
+                new ChannelMembershipSnapshot("normal_channel", "agent", "agent-b", "wake", "active", 0, new Dictionary<string, string>())
+            ]
+        };
+
+        // Default policy options (agent tennis enabled) — no IOptions passed
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(
+            Source: "channels", ProjectId: "test-project", Limit: 10,
+            Now: DateTimeOffset.Parse("2026-05-26T00:01:00Z"), ChannelId: "normal_channel"));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(0, result.CreatedCount);       // suppressed by agent-tennis brake
+        Assert.Equal(2, result.SuppressedCount);     // sender skip (agent-b) + policy suppress (agent-a)
+        Assert.Equal(0, await CountDeliveriesAsync(databasePath));
+    }
+
+    [Fact]
+    public async Task AgentTennisTestOverride_ByChannelId_PermitsAgentTennisChain()
+    {
+        // Same A->B->A chain scenario but in the agent-tennis-test channel
+        // (ch_agent_tennis_test). With the override that relaxes agent tennis,
+        // cascade depth, self-message, and cooldown brakes, the delivery
+        // should proceed.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+
+        var overrideOptions = new DeliveryPolicyOptions
+        {
+            TargetCooldownSeconds = 300,
+            AutoReplyWindowSeconds = 86400,
+            CascadeDepthEnabled = true,
+            MaxCascadeDepth = 2,
+            AgentTennisWithoutHumanResetEnabled = true,
+            Deduplicate = true,
+            SuppressSelfMessages = true,
+            SuppressReactions = true,
+            SuppressMirrorSummaries = true,
+            ChannelOverrides = new Dictionary<string, DeliveryPolicyChannelOverride>
+            {
+                ["agent-tennis-test"] = new()
+                {
+                    ChannelId = "ch_agent_tennis_test",
+                    ChannelSlug = "agent-tennis-test",
+                    TargetCooldownSeconds = 0,
+                    AutoReplyWindowSeconds = 864000,
+                    CascadeDepthEnabled = false,
+                    MaxCascadeDepth = 10,
+                    AgentTennisWithoutHumanResetEnabled = false,
+                    Deduplicate = true,
+                    SuppressSelfMessages = false,
+                    SuppressReactions = true,
+                    SuppressMirrorSummaries = true,
+                    Label = "agent-tennis-test-no-safeguards"
+                }
+            }
+        };
+
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot(
+                    Cursor: "600",
+                    EventType: "message_created",
+                    ChannelId: "ch_agent_tennis_test",
+                    SourceKind: "channel_message",
+                    SourceId: "600",
+                    DedupeKey: "channel-message:600",
+                    OccurredAt: DateTimeOffset.Parse("2026-05-26T01:00:00Z"))
+            ],
+            Message = new ChannelMessageSnapshot(
+                ChannelMessageId: "600",
+                ChannelId: "ch_agent_tennis_test",
+                SenderType: "agent",
+                SenderIdentity: "agent-b",
+                MessageKind: "agent_text",
+                Body: "returning the ball",
+                SourceKind: "channel_message",
+                SourceId: "600",
+                DedupeKey: "channel-message:600",
+                CreatedAt: DateTimeOffset.Parse("2026-05-26T01:00:00Z")),
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("ch_agent_tennis_test", "agent", "agent-a", "wake", "active", 60, new Dictionary<string, string>()),
+                new ChannelMembershipSnapshot("ch_agent_tennis_test", "agent", "agent-b", "wake", "active", 60, new Dictionary<string, string>())
+            ]
+        };
+
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels,
+            Options.Create(overrideOptions));
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(
+            Source: "channels", ProjectId: "test-project", Limit: 10,
+            Now: DateTimeOffset.Parse("2026-05-26T01:01:00Z"), ChannelId: "ch_agent_tennis_test"));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(1, result.CreatedCount);        // override allows the delivery
+        Assert.Equal(1, result.SuppressedCount);     // sender skip (agent-b) only
+        var row = await ReadSingleDeliveryAsync(databasePath);
+        Assert.Equal("agent-a", row.TargetIdentity);
+        Assert.Equal("wake", row.DeliveryMode);
+    }
+
+    [Fact]
+    public async Task NormalSharedChannel_RemainsConservative_WithOverrideOptions()
+    {
+        // A normal shared channel (no matching override) in an options
+        // configuration that includes agent-tennis overrides. The normal
+        // channel must still apply global defaults (agent tennis brake active).
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+
+        // Options with the agent-tennis-test override present but not matching
+        var optionsWithOverrides = new DeliveryPolicyOptions
+        {
+            TargetCooldownSeconds = 300,
+            CascadeDepthEnabled = true,
+            MaxCascadeDepth = 2,
+            AgentTennisWithoutHumanResetEnabled = true,
+            ChannelOverrides = new Dictionary<string, DeliveryPolicyChannelOverride>
+            {
+                ["agent-tennis-test"] = new()
+                {
+                    ChannelId = "ch_agent_tennis_test",
+                    AgentTennisWithoutHumanResetEnabled = false
+                }
+            }
+        };
+
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot(
+                    Cursor: "700",
+                    EventType: "message_created",
+                    ChannelId: "normal_team_channel",
+                    SourceKind: "channel_message",
+                    SourceId: "700",
+                    DedupeKey: "channel-message:700",
+                    OccurredAt: DateTimeOffset.Parse("2026-05-26T02:00:00Z"))
+            ],
+            Message = new ChannelMessageSnapshot(
+                ChannelMessageId: "700",
+                ChannelId: "normal_team_channel",
+                SenderType: "agent",
+                SenderIdentity: "agent-b",
+                MessageKind: "agent_text",
+                Body: "handoff to agent-a",
+                SourceKind: "channel_message",
+                SourceId: "700",
+                DedupeKey: "channel-message:700",
+                CreatedAt: DateTimeOffset.Parse("2026-05-26T02:00:00Z")),
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("normal_team_channel", "agent", "agent-a", "wake", "active", 0, new Dictionary<string, string>()),
+                new ChannelMembershipSnapshot("normal_team_channel", "agent", "agent-b", "wake", "active", 0, new Dictionary<string, string>())
+            ]
+        };
+
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels,
+            Options.Create(optionsWithOverrides));
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(
+            Source: "channels", ProjectId: "test-project", Limit: 10,
+            Now: DateTimeOffset.Parse("2026-05-26T02:01:00Z"), ChannelId: "normal_team_channel"));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(0, result.CreatedCount);        // suppressed by global defaults
+        Assert.Equal(2, result.SuppressedCount);
+        Assert.Equal(0, await CountDeliveriesAsync(databasePath));
     }
 
     private static string CreateTempDatabasePath()

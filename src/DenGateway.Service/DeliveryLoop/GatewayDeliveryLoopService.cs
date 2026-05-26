@@ -1,7 +1,9 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using DenGateway.Service.Clients;
+using DenGateway.Service.Deliveries;
 using DenGateway.Service.Persistence;
+using Microsoft.Extensions.Options;
 
 namespace DenGateway.Service.DeliveryLoop;
 
@@ -11,12 +13,14 @@ public sealed class GatewayDeliveryLoopService
     private readonly GatewayDatabase _database;
     private readonly IDenCoreClient _denCoreClient;
     private readonly IDenChannelsClient _denChannelsClient;
+    private readonly DeliveryPolicyOptions _policyOptions;
 
-    public GatewayDeliveryLoopService(GatewayDatabase database, IDenCoreClient denCoreClient, IDenChannelsClient denChannelsClient)
+    public GatewayDeliveryLoopService(GatewayDatabase database, IDenCoreClient denCoreClient, IDenChannelsClient denChannelsClient, IOptions<DeliveryPolicyOptions>? policyOptions = null)
     {
         _database = database;
         _denCoreClient = denCoreClient;
         _denChannelsClient = denChannelsClient;
+        _policyOptions = policyOptions?.Value ?? new DeliveryPolicyOptions();
     }
 
     public async Task<GatewayDeliveryPollResult> PollOnceAsync(GatewayDeliveryPollRequest request, CancellationToken cancellationToken = default)
@@ -208,6 +212,41 @@ public sealed class GatewayDeliveryLoopService
                 var targetType = NormalizeMemberType(membership.MemberType);
                 var dedupeKey = $"{channelEvent.DedupeKey}:{targetType}:{membership.MemberIdentity}";
                 var cascadeDepth = CalculateCascadeDepth(message);
+
+                // --- Configurable DeliveryPolicy evaluation ---
+                // Use the already-resolved delivery mode as the "wake policy"
+                // since ResolveMembershipDeliveryMode has already applied
+                // the membership wake policy rules. This avoids duplicate
+                // suppression from DeliveryPolicy's own wake-policy checks.
+                var deliveryInput = new DeliverySimulationInput(
+                    SourceKind: channelEvent.SourceKind,
+                    SourceMessageKind: message?.MessageKind ?? channelEvent.EventType,
+                    SenderType: message?.SenderType ?? membership.MemberType,
+                    SenderIdentity: message?.SenderIdentity ?? membership.MemberIdentity,
+                    TargetType: targetType,
+                    TargetIdentity: membership.MemberIdentity,
+                    DeliveryMode: deliveryDecision.DeliveryMode,
+                    WakePolicy: deliveryDecision.DeliveryMode, // already resolved
+                    GatewayState: "normal",
+                    HasExplicitMention: MentionsMember(message, membership.MemberIdentity),
+                    DedupeAlreadySeen: false,
+                    TargetInCooldown: false,
+                    AutoReplyWindowExceeded: false,
+                    CascadeDepth: cascadeDepth,
+                    MaxCascadeDepth: _policyOptions.MaxCascadeDepth,
+                    AgentTennisWithoutHumanReset: IsAgentTennisWithoutHumanReset(message),
+                    AmbiguousTarget: false,
+                    HasActiveBinding: true,
+                    SourceExpired: false,
+                    ChannelId: channelEvent.ChannelId,
+                    ChannelSlug: null);
+                var policyDecision = DeliveryPolicy.Evaluate(deliveryInput, _policyOptions);
+                if (!policyDecision.ShouldDeliver)
+                {
+                    suppressed++;
+                    continue;
+                }
+
                 var create = await _database.CreateDeliveryRequestAsync(new DeliveryCreateRequest(
                     SourceKind: channelEvent.SourceKind,
                     SourceId: channelEvent.SourceId,
@@ -380,6 +419,19 @@ public sealed class GatewayDeliveryLoopService
     private static bool IsSelfMessage(ChannelMessageSnapshot message, string memberIdentity)
     {
         return string.Equals(message.SenderIdentity, memberIdentity, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Detect agent-originated message without evidence of a human in the loop.
+    /// When the sender is an agent (not user/human_text), this is conservatively
+    /// treated as agent-tennis requiring a human reset. The DeliveryPolicy
+    /// evaluate method will apply the configured brakes; the agent-tennis-test
+    /// override can relax this via AgentTennisWithoutHumanResetEnabled=false.
+    /// </summary>
+    private static bool IsAgentTennisWithoutHumanReset(ChannelMessageSnapshot? message)
+    {
+        if (message is null) return false;
+        return string.Equals(message.SenderType, "agent", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool MentionsMember(ChannelMessageSnapshot? message, string memberIdentity)

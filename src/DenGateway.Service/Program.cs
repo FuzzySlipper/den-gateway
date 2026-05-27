@@ -1,4 +1,5 @@
 using DenGateway.Service.Activity;
+using DenGateway.Service.AgentOverview;
 using DenGateway.Service.Bindings;
 using DenGateway.Service.Clients;
 using DenGateway.Service.Deliveries;
@@ -24,6 +25,8 @@ builder.Services.AddSingleton<ChannelActivityEventRouter>();
 builder.Services.AddSingleton<GatewayDeliveryLoopService>();
 builder.Services.AddSingleton<GatewayChannelProjectDiscoveryService>();
 builder.Services.AddHostedService<GatewayDeliveryLoopHostedService>();
+
+builder.Services.AddSingleton<GatewayStateOverviewService>();
 
 builder.Services.AddOptions<DiscordBridgeOptions>()
     .Bind(builder.Configuration.GetSection(DiscordBridgeOptions.SectionName))
@@ -239,6 +242,25 @@ app.MapGet("/api/binding-snapshots", async (BindingSnapshotService bindingSnapsh
     var items = await bindingSnapshots.ListAsync(observedAt, cancellationToken);
     var health = await bindingSnapshots.GetHealthAsync(observedAt, cancellationToken);
     return Results.Ok(new BindingSnapshotListResponse(items, health));
+});
+
+app.MapGet("/api/agent-overview/gateway-state", async (
+    GatewayStateOverviewService overviewService,
+    string? projectId,
+    string? agentIdentity,
+    string? role,
+    int? includeTerminalMinutes,
+    int? limit,
+    CancellationToken cancellationToken) =>
+{
+    var request = new GatewayStateOverviewRequest(
+        ProjectId: projectId,
+        AgentIdentity: agentIdentity,
+        Role: role,
+        IncludeTerminalMinutes: includeTerminalMinutes ?? 120,
+        Limit: limit ?? 200);
+    var result = await overviewService.GetGatewayStateOverviewAsync(request, cancellationToken);
+    return Results.Ok(result);
 });
 
 app.MapPost("/api/discord-bridge/notifications", async (

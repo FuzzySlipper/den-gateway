@@ -20,6 +20,7 @@ This repo currently contains the first .NET skeleton for Den Gateway:
 - `/api/deliveries/claim` — atomic adapter claim endpoint for pending delivery requests.
 - `PUT /api/adapter-bindings/heartbeat` — upserts an active adapter binding for Hermes/profile claimers.
 - `/api/deliveries/{id}/delivered`, `/ack`, `/fail`, `/complete`, `/expire` — structured delivery callback endpoints with attempt/ack metadata.
+- `GET /api/agent-overview/gateway-state` — read-only projection of Gateway-owned runtime slice grouped by (projectId, agentIdentity, role); shows binding freshness, delivery summary counts, and group classification.
 
 ## Configuration
 

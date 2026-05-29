@@ -275,6 +275,199 @@ public class DeliveryClaimTests
         Assert.Equal("den://project/den-gateway/task/1391", delivery.ContextLink);
     }
 
+    [Fact]
+    public async Task AssignmentMetadataPropagatesFromDeliveryRequestToClaimedDeliveryDto()
+    {
+        // Verify that assignment_id, worker_identity, worker_role, and
+        // assignment_purpose survive from delivery request creation through
+        // claim into the ClaimedDeliveryDto.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var bindingId = await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:den-k8:den-gateway-runner:gateway-main",
+            AgentIdentity: "den-gateway-runner",
+            UserIdentity: null,
+            ProjectId: "den-gateway",
+            Role: "runner",
+            Status: "active",
+            CapabilitiesJson: "{\"delivery_modes\":[\"wake\",\"pause\"]}",
+            MetadataJson: "{}",
+            LastSeenAt: DateTimeOffset.Parse("2026-05-13T22:30:00Z"),
+            ExpiresAt: DateTimeOffset.Parse("2026-05-13T23:30:00Z")));
+
+        // Create a delivery request WITH assignment fields
+        var createResult = await database.CreateDeliveryRequestAsync(new DeliveryCreateRequest(
+            SourceKind: "task_message",
+            SourceId: "456",
+            SourceProjectId: "den-gateway",
+            TargetType: "agent",
+            TargetIdentity: "den-gateway-runner",
+            ProjectId: "den-gateway",
+            TaskId: 1723,
+            ChannelId: null,
+            DeliveryMode: "wake",
+            Priority: 2,
+            Reason: "worker_assignment",
+            ContextSummary: "Assignment wake for task 1723",
+            ContextLink: "den://project/den-gateway/task/1723",
+            MetadataJson: "{\"source\":\"core\",\"assignment_test\":true}",
+            Status: "pending",
+            SuppressionReason: null,
+            DedupeKey: "dedupe:assignment:1",
+            CascadeDepth: 0,
+            NextAttemptAt: null,
+            ExpiresAt: null,
+            CreatedAt: DateTimeOffset.Parse("2026-05-13T22:30:00Z"),
+            AssignmentId: "asn-42",
+            WorkerIdentity: "spawned-coder",
+            WorkerRole: "coder",
+            AssignmentPurpose: "implement_task_1723"));
+
+        Assert.False(createResult.AlreadyExisted);
+
+        var claimResult = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:den-k8:den-gateway-runner:gateway-main",
+            ProjectId: "den-gateway",
+            AgentIdentity: "den-gateway-runner",
+            Role: "runner",
+            AcceptedDeliveryModes: ["wake"],
+            Limit: 5,
+            LeaseSeconds: 60,
+            ClaimedAt: DateTimeOffset.Parse("2026-05-13T22:31:00Z")));
+
+        var claim = Assert.Single(claimResult.Deliveries);
+        Assert.Equal(createResult.DeliveryRequestId, claim.DeliveryRequestId);
+        Assert.Equal("asn-42", claim.AssignmentId);
+        Assert.Equal("spawned-coder", claim.WorkerIdentity);
+        Assert.Equal("coder", claim.WorkerRole);
+        Assert.Equal("implement_task_1723", claim.AssignmentPurpose);
+    }
+
+    [Fact]
+    public async Task ClaimedDeliveryAssignmentFieldsAreOptionalAndNullByDefault()
+    {
+        // Verify that a delivery request without assignment fields still
+        // claims successfully and the DTO omits them.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:den-k8:den-gateway-runner:gateway-main",
+            AgentIdentity: "den-gateway-runner",
+            UserIdentity: null,
+            ProjectId: "den-gateway",
+            Role: "runner",
+            Status: "active",
+            CapabilitiesJson: "{}",
+            MetadataJson: "{}",
+            LastSeenAt: DateTimeOffset.Parse("2026-05-13T22:30:00Z"),
+            ExpiresAt: DateTimeOffset.Parse("2026-05-13T23:30:00Z")));
+
+        // No assignment fields in this request
+        var deliveryId = await InsertDeliveryRequestAsync(databasePath, "den-gateway-runner", "wake", "dedupe:no-assignment:1");
+
+        var claimResult = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            "hermes_profile", "hermes:den-k8:den-gateway-runner:gateway-main",
+            "den-gateway", "den-gateway-runner", "runner", ["wake"], 1, 60,
+            DateTimeOffset.Parse("2026-05-13T22:31:00Z")));
+
+        var claim = Assert.Single(claimResult.Deliveries);
+        Assert.Equal(deliveryId, claim.DeliveryRequestId);
+        Assert.Null(claim.AssignmentId);
+        Assert.Null(claim.WorkerIdentity);
+        Assert.Null(claim.WorkerRole);
+        Assert.Null(claim.AssignmentPurpose);
+    }
+
+    [Fact]
+    public async Task TerminalCallbackPreservesAssignmentMetadataAcrossAttempts()
+    {
+        // Verify that assignment fields remain accessible via the delivery
+        // request after a claim-callback-completed lifecycle.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:den-k8:den-gateway-runner:gateway-main",
+            AgentIdentity: "den-gateway-runner",
+            UserIdentity: null,
+            ProjectId: "den-gateway",
+            Role: "runner",
+            Status: "active",
+            CapabilitiesJson: "{}",
+            MetadataJson: "{}",
+            LastSeenAt: DateTimeOffset.Parse("2026-05-13T22:30:00Z"),
+            ExpiresAt: DateTimeOffset.Parse("2026-05-13T23:30:00Z")));
+
+        var createResult = await database.CreateDeliveryRequestAsync(new DeliveryCreateRequest(
+            SourceKind: "task_message",
+            SourceId: "789",
+            SourceProjectId: "den-gateway",
+            TargetType: "agent",
+            TargetIdentity: "den-gateway-runner",
+            ProjectId: "den-gateway",
+            TaskId: 1723,
+            ChannelId: null,
+            DeliveryMode: "wake",
+            Priority: 2,
+            Reason: "worker_assignment",
+            ContextSummary: "Assignment callback test",
+            ContextLink: "den://project/den-gateway/task/1723",
+            MetadataJson: "{}",
+            Status: "pending",
+            SuppressionReason: null,
+            DedupeKey: "dedupe:callback-assignment:1",
+            CascadeDepth: 0,
+            NextAttemptAt: null,
+            ExpiresAt: null,
+            CreatedAt: DateTimeOffset.Parse("2026-05-13T22:30:00Z"),
+            AssignmentId: "asn-99",
+            WorkerIdentity: "test-worker",
+            WorkerRole: "reviewer",
+            AssignmentPurpose: "verify_delivery"));
+
+        var claimResult = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            "hermes_profile", "hermes:den-k8:den-gateway-runner:gateway-main",
+            "den-gateway", "den-gateway-runner", "runner", ["wake"], 1, 60,
+            DateTimeOffset.Parse("2026-05-13T22:31:00Z")));
+
+        var attemptId = Assert.Single(claimResult.Deliveries).AttemptId;
+
+        var callback = new DeliveryCallbackRequest(
+            AttemptId: attemptId,
+            AckKind: "completed",
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:den-k8:den-gateway-runner:gateway-main",
+            ExternalMessageId: "msg-cb-1",
+            SessionId: "session-cb-1",
+            ObservedAt: DateTimeOffset.Parse("2026-05-13T22:31:30Z"),
+            MetadataJson: "{}",
+            ErrorCode: null,
+            ErrorMessage: null);
+
+        var cbResult = await database.ApplyDeliveryCallbackAsync(createResult.DeliveryRequestId, "completed", callback);
+        Assert.Equal("completed", cbResult.Status);
+
+        // Verify assignment fields are preserved in the delivery_request row
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT assignment_id, worker_identity, worker_role, assignment_purpose, status FROM delivery_requests WHERE id = $id";
+        cmd.Parameters.AddWithValue("$id", createResult.DeliveryRequestId);
+        await using var reader = await cmd.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("asn-99", reader.GetString(0));
+        Assert.Equal("test-worker", reader.GetString(1));
+        Assert.Equal("reviewer", reader.GetString(2));
+        Assert.Equal("verify_delivery", reader.GetString(3));
+        Assert.Equal("completed", reader.GetString(4));
+    }
+
     private static string CreateTempDatabasePath()
     {
         var dir = Path.Combine(Path.GetTempPath(), "den-gateway-tests", Guid.NewGuid().ToString("N"));

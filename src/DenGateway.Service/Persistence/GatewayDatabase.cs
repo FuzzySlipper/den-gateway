@@ -39,6 +39,10 @@ public sealed class GatewayDatabase
 
         await EnsureColumnAsync(connection, "delivery_requests", "lease_expires_at", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "delivery_requests", "metadata_json", "TEXT NOT NULL DEFAULT '{}'", cancellationToken);
+        await EnsureColumnAsync(connection, "delivery_requests", "assignment_id", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(connection, "delivery_requests", "worker_identity", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(connection, "delivery_requests", "worker_role", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(connection, "delivery_requests", "assignment_purpose", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "delivery_attempts", "ack_kind", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "delivery_attempts", "external_message_id", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "delivery_attempts", "session_id", "TEXT NULL", cancellationToken);
@@ -247,12 +251,14 @@ public sealed class GatewayDatabase
                 source_kind, source_id, source_project_id, target_type, target_identity, project_id, task_id,
                 channel_id, delivery_mode, priority, reason, context_summary, context_link, metadata_json,
                 status, suppression_reason, dedupe_key, cascade_depth, attempt_count, next_attempt_at,
-                expires_at, created_at, updated_at
+                expires_at, assignment_id, worker_identity, worker_role, assignment_purpose,
+                created_at, updated_at
             ) VALUES (
                 $source_kind, $source_id, $source_project_id, $target_type, $target_identity, $project_id, $task_id,
                 $channel_id, $delivery_mode, $priority, $reason, $context_summary, $context_link, $metadata_json,
                 $status, $suppression_reason, $dedupe_key, $cascade_depth, 0, $next_attempt_at,
-                $expires_at, $created_at, $updated_at
+                $expires_at, $assignment_id, $worker_identity, $worker_role, $assignment_purpose,
+                $created_at, $updated_at
             )
             RETURNING id;
             """;
@@ -276,6 +282,10 @@ public sealed class GatewayDatabase
         command.Parameters.AddWithValue("$cascade_depth", request.CascadeDepth);
         command.Parameters.AddWithValue("$next_attempt_at", request.NextAttemptAt is null ? DBNull.Value : request.NextAttemptAt.Value.ToString("O"));
         command.Parameters.AddWithValue("$expires_at", request.ExpiresAt is null ? DBNull.Value : request.ExpiresAt.Value.ToString("O"));
+        command.Parameters.AddWithValue("$assignment_id", DbValue(request.AssignmentId));
+        command.Parameters.AddWithValue("$worker_identity", DbValue(request.WorkerIdentity));
+        command.Parameters.AddWithValue("$worker_role", DbValue(request.WorkerRole));
+        command.Parameters.AddWithValue("$assignment_purpose", DbValue(request.AssignmentPurpose));
         command.Parameters.AddWithValue("$created_at", now);
         command.Parameters.AddWithValue("$updated_at", now);
 
@@ -354,7 +364,11 @@ public sealed class GatewayDatabase
                     ContextLink: candidate.ContextLink,
                     MetadataJson: candidate.MetadataJson,
                     DedupeKey: candidate.DedupeKey,
-                    LeaseExpiresAt: leaseExpiresAt));
+                    LeaseExpiresAt: leaseExpiresAt,
+                    AssignmentId: candidate.AssignmentId,
+                    WorkerIdentity: candidate.WorkerIdentity,
+                    WorkerRole: candidate.WorkerRole,
+                    AssignmentPurpose: candidate.AssignmentPurpose));
             }
 
             await ExecuteNonQueryAsync(connection, "COMMIT;", cancellationToken);
@@ -532,7 +546,8 @@ public sealed class GatewayDatabase
 
         command.CommandText = $"""
             SELECT id, source_kind, source_id, source_project_id, target_type, target_identity, project_id,
-                   delivery_mode, context_summary, context_link, metadata_json, dedupe_key, attempt_count
+                   delivery_mode, context_summary, context_link, metadata_json, dedupe_key, attempt_count,
+                   assignment_id, worker_identity, worker_role, assignment_purpose
             FROM delivery_requests
             WHERE status = 'pending'
               AND delivery_mode IN ({string.Join(", ", modeParameters)})
@@ -573,7 +588,11 @@ public sealed class GatewayDatabase
                 ContextLink: reader.IsDBNull(9) ? null : reader.GetString(9),
                 MetadataJson: reader.IsDBNull(10) ? "{}" : reader.GetString(10),
                 DedupeKey: reader.GetString(11),
-                AttemptCount: reader.GetInt32(12)));
+                AttemptCount: reader.GetInt32(12),
+                AssignmentId: reader.IsDBNull(13) ? null : reader.GetString(13),
+                WorkerIdentity: reader.IsDBNull(14) ? null : reader.GetString(14),
+                WorkerRole: reader.IsDBNull(15) ? null : reader.GetString(15),
+                AssignmentPurpose: reader.IsDBNull(16) ? null : reader.GetString(16)));
         }
 
         return rows;
@@ -700,7 +719,11 @@ public sealed class GatewayDatabase
         string? ContextLink,
         string MetadataJson,
         string DedupeKey,
-        int AttemptCount);
+        int AttemptCount,
+        string? AssignmentId,
+        string? WorkerIdentity,
+        string? WorkerRole,
+        string? AssignmentPurpose);
 
     private static readonly string[] SchemaStatements =
     [
@@ -941,7 +964,11 @@ public sealed record ClaimedDeliveryDto(
     [property: JsonPropertyName("context_link")] string? ContextLink,
     [property: JsonPropertyName("metadata_json")] string MetadataJson,
     [property: JsonPropertyName("dedupe_key")] string DedupeKey,
-    [property: JsonPropertyName("lease_expires_at")] DateTimeOffset LeaseExpiresAt);
+    [property: JsonPropertyName("lease_expires_at")] DateTimeOffset LeaseExpiresAt,
+    [property: JsonPropertyName("assignment_id")] string? AssignmentId = null,
+    [property: JsonPropertyName("worker_identity")] string? WorkerIdentity = null,
+    [property: JsonPropertyName("worker_role")] string? WorkerRole = null,
+    [property: JsonPropertyName("assignment_purpose")] string? AssignmentPurpose = null);
 
 public sealed record BindingSnapshotWrite(string AdapterKind, string AdapterInstanceId, string? AgentIdentity, string? ProjectId, string? Role, string Status, string? TransportEndpoint, DateTimeOffset? LastSeenAt, DateTimeOffset? ExpiresAt, string MetadataJson);
 public sealed record BindingSnapshotRead(DateTimeOffset CapturedAt, string? AgentIdentity, string? ProjectId, string? Role, string AdapterKind, string AdapterInstanceId, string? TransportEndpoint, string Status, DateTimeOffset? LastSeenAt, DateTimeOffset? ExpiresAt, string MetadataJson);
@@ -967,7 +994,11 @@ public sealed record DeliveryCreateRequest(
     int CascadeDepth,
     DateTimeOffset? NextAttemptAt,
     DateTimeOffset? ExpiresAt,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    string? AssignmentId = null,
+    string? WorkerIdentity = null,
+    string? WorkerRole = null,
+    string? AssignmentPurpose = null);
 
 public sealed record DeliveryCreateResult(long DeliveryRequestId, bool AlreadyExisted);
 

@@ -1023,6 +1023,81 @@ public class DeliveryLoopTests
         Assert.Equal("normal_team_channel", supMeta["channel_id"]?.ToString());
     }
 
+    [Fact]
+    public async Task CoreOutboxAssignmentMetadataIsPropagatedToDeliveryRequest()
+    {
+        // Verify that when the Core source summary includes assignmentId,
+        // workerIdentity, workerRole, and assignmentPurpose, those values
+        // are stored in the delivery_request row and forwarded through claim.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var core = new FakeDenCoreClient
+        {
+            OutboxEvents =
+            [
+                new GatewayOutboxEvent(
+                    Cursor: "99",
+                    EventId: "core-event-99",
+                    EventType: "worker_assignment",
+                    ProjectId: "den-gateway",
+                    SourceKind: "worker_assignment",
+                    SourceId: "8500",
+                    OccurredAt: DateTimeOffset.Parse("2026-05-29T10:00:00Z"),
+                    Actor: "system",
+                    SummaryHint: "Assignment wake for task 1723",
+                    DeepLink: "den://project/den-gateway/task/1723",
+                    Severity: "normal",
+                    DedupeKey: "core:assignment:1723")
+            ],
+            SourceSummary = new SourceSummary(
+                SourceKind: "worker_assignment",
+                SourceId: "8500",
+                SourceProjectId: "den-gateway",
+                Title: "Worker assignment 1723",
+                Summary: "Wake spawned-coder for task 1723",
+                DeepLink: "den://project/den-gateway/task/1723",
+                OccurredAt: DateTimeOffset.Parse("2026-05-29T10:00:00Z"),
+                Actor: "system",
+                Severity: "normal",
+                Metadata: new Dictionary<string, string>
+                {
+                    ["targetType"] = "agent",
+                    ["targetIdentity"] = "spawned-coder",
+                    ["deliveryMode"] = "wake",
+                    ["taskId"] = "1723",
+                    ["reason"] = "worker_assignment",
+                    ["assignmentId"] = "asn-1723",
+                    ["workerIdentity"] = "spawned-coder",
+                    ["workerRole"] = "coder",
+                    ["assignmentPurpose"] = "implement_task_1723"
+                })
+        };
+        var service = new GatewayDeliveryLoopService(database, core, new FakeDenChannelsClient());
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(
+            Source: "core", ProjectId: "den-gateway", Limit: 10,
+            Now: DateTimeOffset.Parse("2026-05-29T10:01:00Z")));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(1, result.CreatedCount);
+
+        // Verify assignment fields made it into the delivery_request row
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT assignment_id, worker_identity, worker_role, assignment_purpose, task_id, target_identity, delivery_mode FROM delivery_requests WHERE dedupe_key = 'core:assignment:1723'";
+        await using var reader = await cmd.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("asn-1723", reader.GetString(0));
+        Assert.Equal("spawned-coder", reader.GetString(1));
+        Assert.Equal("coder", reader.GetString(2));
+        Assert.Equal("implement_task_1723", reader.GetString(3));
+        Assert.Equal(1723, reader.GetInt32(4));
+        Assert.Equal("spawned-coder", reader.GetString(5));
+        Assert.Equal("wake", reader.GetString(6));
+    }
+
     private static string CreateTempDatabasePath()
     {
         var dir = Path.Combine(Path.GetTempPath(), "den-gateway-tests", Guid.NewGuid().ToString("N"));

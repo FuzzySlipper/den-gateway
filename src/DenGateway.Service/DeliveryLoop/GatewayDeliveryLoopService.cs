@@ -88,6 +88,10 @@ public sealed class GatewayDeliveryLoopService
             var targetType = GetMetadata(metadata, "targetType", "agent");
             var deliveryMode = GetMetadata(metadata, "deliveryMode", "wake");
             var dedupeKey = string.IsNullOrWhiteSpace(item.DedupeKey) ? $"core:{item.EventId}" : item.DedupeKey;
+            var assignmentId = metadata.TryGetValue("assignmentId", out var aId) && !string.IsNullOrWhiteSpace(aId) ? aId : null;
+            var workerIdentity = metadata.TryGetValue("workerIdentity", out var wId) && !string.IsNullOrWhiteSpace(wId) ? wId : null;
+            var workerRole = metadata.TryGetValue("workerRole", out var wRole) && !string.IsNullOrWhiteSpace(wRole) ? wRole : null;
+            var assignmentPurpose = metadata.TryGetValue("assignmentPurpose", out var aPurpose) && !string.IsNullOrWhiteSpace(aPurpose) ? aPurpose : null;
             var create = await _database.CreateDeliveryRequestAsync(new DeliveryCreateRequest(
                 SourceKind: item.SourceKind,
                 SourceId: item.SourceId,
@@ -118,7 +122,11 @@ public sealed class GatewayDeliveryLoopService
                 CascadeDepth: 0,
                 NextAttemptAt: null,
                 ExpiresAt: null,
-                CreatedAt: now), cancellationToken);
+                CreatedAt: now,
+                AssignmentId: assignmentId,
+                WorkerIdentity: workerIdentity,
+                WorkerRole: workerRole,
+                AssignmentPurpose: assignmentPurpose), cancellationToken);
 
             if (create.AlreadyExisted)
             {

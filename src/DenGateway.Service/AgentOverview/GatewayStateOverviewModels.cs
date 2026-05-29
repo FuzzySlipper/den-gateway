@@ -121,7 +121,11 @@ public sealed record GatewayDeliveryOverview(
     [property: JsonPropertyName("createdAt")] DateTimeOffset CreatedAt,
     [property: JsonPropertyName("updatedAt")] DateTimeOffset UpdatedAt,
     [property: JsonPropertyName("lastAttempt")] GatewayDeliveryAttemptOverview? LastAttempt,
-    [property: JsonPropertyName("flags")] IReadOnlyList<string> Flags);
+    [property: JsonPropertyName("flags")] IReadOnlyList<string> Flags,
+    [property: JsonPropertyName("assignmentId")] string? AssignmentId = null,
+    [property: JsonPropertyName("workerIdentity")] string? WorkerIdentity = null,
+    [property: JsonPropertyName("workerRole")] string? WorkerRole = null,
+    [property: JsonPropertyName("assignmentPurpose")] string? AssignmentPurpose = null);
 
 public sealed record GatewayDeliveryAttemptOverview(
     [property: JsonPropertyName("attemptId")] long AttemptId,

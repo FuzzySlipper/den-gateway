@@ -439,6 +439,163 @@ public class GatewayStateOverviewTests
         }
     }
 
+    [Fact]
+    public async Task DeliveryOverviewExposesAssignmentCorrelationFields()
+    {
+        // Verify that assignment_id, worker_identity, worker_role, and
+        // assignment_purpose appear in GatewayDeliveryOverview rows.
+        var (databasePath, database) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(databasePath, "hermes_profile", "r1", "my-agent", null, "den-proj", "runner",
+                "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+
+            // Seed a delivery with assignment fields via raw INSERT
+            await using var connection = new SqliteConnection($"Data Source={databasePath}");
+            await connection.OpenAsync();
+            await using var insert = connection.CreateCommand();
+            insert.CommandText = """
+                INSERT INTO delivery_requests (
+                    source_kind, source_id, target_type, target_identity, project_id, task_id,
+                    delivery_mode, priority, status, dedupe_key, attempt_count, cascade_depth,
+                    assignment_id, worker_identity, worker_role, assignment_purpose,
+                    created_at, updated_at
+                ) VALUES (
+                    'worker_assignment', '8500', 'agent', $target, $project, 1723,
+                    'wake', 2, $status, $dedupe, 0, 0,
+                    $assignment_id, $worker_identity, $worker_role, $assignment_purpose,
+                    $created, $updated
+                )
+                """;
+            insert.Parameters.AddWithValue("$target", "my-agent");
+            insert.Parameters.AddWithValue("$project", "den-proj");
+            insert.Parameters.AddWithValue("$status", "pending");
+            insert.Parameters.AddWithValue("$dedupe", "dedupe:overview:asn1");
+            insert.Parameters.AddWithValue("$assignment_id", "asn-overview-1");
+            insert.Parameters.AddWithValue("$worker_identity", "spawned-coder");
+            insert.Parameters.AddWithValue("$worker_role", "coder");
+            insert.Parameters.AddWithValue("$assignment_purpose", "implement_task_1723");
+            insert.Parameters.AddWithValue("$created", TestNow.AddMinutes(-10).ToString("O"));
+            insert.Parameters.AddWithValue("$updated", TestNow.AddMinutes(-10).ToString("O"));
+            await insert.ExecuteNonQueryAsync();
+
+            var service = new GatewayStateOverviewService(database);
+            var request = new GatewayStateOverviewRequest(AgentIdentity: "my-agent");
+            var result = await service.GetGatewayStateOverviewAsync(request, TestNow);
+
+            var group = Assert.Single(result.Groups);
+            var delivery = Assert.Single(group.CurrentDeliveries);
+            Assert.Equal("asn-overview-1", delivery.AssignmentId);
+            Assert.Equal("spawned-coder", delivery.WorkerIdentity);
+            Assert.Equal("coder", delivery.WorkerRole);
+            Assert.Equal("implement_task_1723", delivery.AssignmentPurpose);
+        }
+        finally
+        {
+            CleanupDatabase(databasePath);
+        }
+    }
+
+    [Fact]
+    public async Task StaleAssignmentDeliveryGetsDiagnosticFlag()
+    {
+        // Verify that a delivery with assignment_id that has been pending
+        // longer than StaleAssignmentMinutes gets the "stale_assignment" flag.
+        var (databasePath, database) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(databasePath, "hermes_profile", "r1", "my-agent", null, "den-proj", "runner",
+                "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+
+            // Pending delivery with assignment_id, created 20 minutes ago
+            await using var connection = new SqliteConnection($"Data Source={databasePath}");
+            await connection.OpenAsync();
+            await using var insert = connection.CreateCommand();
+            insert.CommandText = """
+                INSERT INTO delivery_requests (
+                    source_kind, source_id, target_type, target_identity, project_id, task_id,
+                    delivery_mode, priority, status, dedupe_key, attempt_count, cascade_depth,
+                    assignment_id, worker_identity, created_at, updated_at
+                ) VALUES (
+                    'worker_assignment', '8501', 'agent', $target, $project, 1723,
+                    'wake', 2, $status, $dedupe, 0, 0,
+                    $assignment_id, $worker_identity, $created, $updated
+                )
+                """;
+            insert.Parameters.AddWithValue("$target", "my-agent");
+            insert.Parameters.AddWithValue("$project", "den-proj");
+            insert.Parameters.AddWithValue("$status", "pending");
+            insert.Parameters.AddWithValue("$dedupe", "dedupe:stale:asn1");
+            insert.Parameters.AddWithValue("$assignment_id", "asn-stale-1");
+            insert.Parameters.AddWithValue("$worker_identity", "stale-worker");
+            insert.Parameters.AddWithValue("$created", TestNow.AddMinutes(-20).ToString("O"));
+            insert.Parameters.AddWithValue("$updated", TestNow.AddMinutes(-20).ToString("O"));
+            await insert.ExecuteNonQueryAsync();
+
+            var service = new GatewayStateOverviewService(database);
+            var request = new GatewayStateOverviewRequest(AgentIdentity: "my-agent");
+            var result = await service.GetGatewayStateOverviewAsync(request, TestNow);
+
+            var group = Assert.Single(result.Groups);
+            var delivery = Assert.Single(group.CurrentDeliveries);
+            Assert.Contains("stale_assignment", delivery.Flags);
+            Assert.Equal("asn-stale-1", delivery.AssignmentId);
+        }
+        finally
+        {
+            CleanupDatabase(databasePath);
+        }
+    }
+
+    [Fact]
+    public async Task AssignmentWithoutStaleness_NoDiagnosticFlag()
+    {
+        // Verify that a fresh assignment delivery (created recently) does NOT
+        // get the stale_assignment flag.
+        var (databasePath, database) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(databasePath, "hermes_profile", "r1", "my-agent", null, "den-proj", "runner",
+                "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+
+            await using var connection = new SqliteConnection($"Data Source={databasePath}");
+            await connection.OpenAsync();
+            await using var insert = connection.CreateCommand();
+            insert.CommandText = """
+                INSERT INTO delivery_requests (
+                    source_kind, source_id, target_type, target_identity, project_id, task_id,
+                    delivery_mode, priority, status, dedupe_key, attempt_count, cascade_depth,
+                    assignment_id, created_at, updated_at
+                ) VALUES (
+                    'worker_assignment', '8502', 'agent', $target, $project, 1723,
+                    'wake', 2, $status, $dedupe, 0, 0,
+                    $assignment_id, $created, $updated
+                )
+                """;
+            insert.Parameters.AddWithValue("$target", "my-agent");
+            insert.Parameters.AddWithValue("$project", "den-proj");
+            insert.Parameters.AddWithValue("$status", "pending");
+            insert.Parameters.AddWithValue("$dedupe", "dedupe:fresh:asn1");
+            insert.Parameters.AddWithValue("$assignment_id", "asn-fresh-1");
+            insert.Parameters.AddWithValue("$created", TestNow.AddMinutes(-2).ToString("O"));
+            insert.Parameters.AddWithValue("$updated", TestNow.AddMinutes(-2).ToString("O"));
+            await insert.ExecuteNonQueryAsync();
+
+            var service = new GatewayStateOverviewService(database);
+            var request = new GatewayStateOverviewRequest(AgentIdentity: "my-agent");
+            var result = await service.GetGatewayStateOverviewAsync(request, TestNow);
+
+            var group = Assert.Single(result.Groups);
+            var delivery = Assert.Single(group.CurrentDeliveries);
+            Assert.DoesNotContain("stale_assignment", delivery.Flags);
+            Assert.Contains("asn-fresh-1", delivery.AssignmentId);
+        }
+        finally
+        {
+            CleanupDatabase(databasePath);
+        }
+    }
+
     // --- Test helpers ---
 
     private static (string databasePath, GatewayDatabase database) CreateInitializedDatabase()

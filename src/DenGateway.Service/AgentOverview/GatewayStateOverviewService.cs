@@ -172,6 +172,8 @@ public sealed class GatewayStateOverviewService
             flags.Add("stuck");
         if (delivery.Status == "delivered")
             flags.Add("delivered_not_completed");
+        if (delivery.AssignmentId is not null && IsStaleAssignment(delivery, now))
+            flags.Add("stale_assignment");
 
         return new GatewayDeliveryOverview(
             DeliveryRequestId: delivery.Id,
@@ -194,7 +196,11 @@ public sealed class GatewayStateOverviewService
             CreatedAt: delivery.CreatedAt,
             UpdatedAt: delivery.UpdatedAt,
             LastAttempt: delivery.LastAttempt,
-            Flags: flags);
+            Flags: flags,
+            AssignmentId: delivery.AssignmentId,
+            WorkerIdentity: delivery.WorkerIdentity,
+            WorkerRole: delivery.WorkerRole,
+            AssignmentPurpose: delivery.AssignmentPurpose);
     }
 
     private static DeliverySummaryCounts ComputeDeliveryCounts(List<DeliveryRow> deliveries, DateTimeOffset now, string state)
@@ -235,6 +241,23 @@ public sealed class GatewayStateOverviewService
         "acknowledged" => delivery.UpdatedAt <= now.AddMinutes(-StuckAcknowledgedMinutes),
         _ => false
     };
+
+    private const int StaleAssignmentMinutes = 15;
+
+    /// <summary>
+    /// An assignment-delivery is considered stale when it has an assignment_id
+    /// and the delivery has been in a non-terminal state for longer than
+    /// StaleAssignmentMinutes without making progress. This indicates the
+    /// leased worker may have lost its assignment or the Core assignment
+    /// may have expired while the Gateway delivery is still active.
+    /// </summary>
+    private static bool IsStaleAssignment(DeliveryRow delivery, DateTimeOffset now)
+    {
+        if (string.IsNullOrWhiteSpace(delivery.AssignmentId))
+            return false;
+        return delivery.Status is "pending" or "delivering" or "delivered" or "acknowledged"
+            && delivery.CreatedAt <= now.AddMinutes(-StaleAssignmentMinutes);
+    }
 
     private static bool IsTerminal(string status) => status is "completed" or "failed" or "expired" or "suppressed";
 
@@ -313,6 +336,7 @@ public sealed class GatewayStateOverviewService
                    dr.lease_expires_at, dr.created_at, dr.updated_at, dr.attempt_count,
                    dr.source_kind, dr.source_id, dr.source_project_id, dr.task_id, dr.channel_id,
                    dr.delivery_mode, dr.context_summary, dr.context_link, dr.next_attempt_at, dr.expires_at,
+                   dr.assignment_id, dr.worker_identity, dr.worker_role, dr.assignment_purpose,
                    da.id, da.attempt_number, da.adapter_binding_id, da.status, da.ack_kind,
                    da.external_message_id, da.session_id, da.observed_at, da.error_code, da.error_message
             FROM delivery_requests dr
@@ -373,17 +397,21 @@ public sealed class GatewayStateOverviewService
                 ContextLink: reader.IsDBNull(16) ? null : reader.GetString(16),
                 NextAttemptAt: ReadDateTimeOffset(reader, 17),
                 ExpiresAt: ReadDateTimeOffset(reader, 18),
-                LastAttempt: reader.IsDBNull(19) ? null : new GatewayDeliveryAttemptOverview(
-                    AttemptId: reader.GetInt64(19),
-                    AttemptNumber: reader.GetInt32(20),
-                    AdapterBindingId: reader.IsDBNull(21) ? null : reader.GetInt64(21),
-                    Status: reader.GetString(22),
-                    AckKind: reader.IsDBNull(23) ? null : reader.GetString(23),
-                    ExternalMessageId: reader.IsDBNull(24) ? null : reader.GetString(24),
-                    SessionId: reader.IsDBNull(25) ? null : reader.GetString(25),
-                    ObservedAt: ReadDateTimeOffset(reader, 26),
-                    ErrorCode: reader.IsDBNull(27) ? null : reader.GetString(27),
-                    ErrorMessage: reader.IsDBNull(28) ? null : Truncate(reader.GetString(28), 240))));
+                AssignmentId: reader.IsDBNull(19) ? null : reader.GetString(19),
+                WorkerIdentity: reader.IsDBNull(20) ? null : reader.GetString(20),
+                WorkerRole: reader.IsDBNull(21) ? null : reader.GetString(21),
+                AssignmentPurpose: reader.IsDBNull(22) ? null : reader.GetString(22),
+                LastAttempt: reader.IsDBNull(23) ? null : new GatewayDeliveryAttemptOverview(
+                    AttemptId: reader.GetInt64(23),
+                    AttemptNumber: reader.GetInt32(24),
+                    AdapterBindingId: reader.IsDBNull(25) ? null : reader.GetInt64(25),
+                    Status: reader.GetString(26),
+                    AckKind: reader.IsDBNull(27) ? null : reader.GetString(27),
+                    ExternalMessageId: reader.IsDBNull(28) ? null : reader.GetString(28),
+                    SessionId: reader.IsDBNull(29) ? null : reader.GetString(29),
+                    ObservedAt: ReadDateTimeOffset(reader, 30),
+                    ErrorCode: reader.IsDBNull(31) ? null : reader.GetString(31),
+                    ErrorMessage: reader.IsDBNull(32) ? null : Truncate(reader.GetString(32), 240))));
         }
 
         return rows;
@@ -418,5 +446,9 @@ public sealed class GatewayStateOverviewService
         string? ContextLink,
         DateTimeOffset? NextAttemptAt,
         DateTimeOffset? ExpiresAt,
+        string? AssignmentId,
+        string? WorkerIdentity,
+        string? WorkerRole,
+        string? AssignmentPurpose,
         GatewayDeliveryAttemptOverview? LastAttempt);
 }

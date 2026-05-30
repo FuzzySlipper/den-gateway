@@ -372,10 +372,11 @@ public class GatewayStateOverviewTests
             var database = new GatewayDatabase(databasePath);
             await database.InitializeAsync();
 
+            var liveNow = DateTimeOffset.UtcNow;
             await SeedBindingAsync(databasePath, "hermes_profile", "runner-1", "test-agent", null, "test-proj", "runner",
-                "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+                "active", liveNow.AddMinutes(-5), liveNow.AddHours(2));
             await SeedDeliveryAsync(databasePath, "test-agent", "test-proj", "pending",
-                dedupeKey: "dedupe:e2e", createdAt: TestNow.AddMinutes(-10));
+                dedupeKey: "dedupe:e2e", createdAt: liveNow.AddMinutes(-10));
 
             await using var factory = new WebApplicationFactory<Program>()
                 .WithWebHostBuilder(builder =>
@@ -589,6 +590,304 @@ public class GatewayStateOverviewTests
             var delivery = Assert.Single(group.CurrentDeliveries);
             Assert.DoesNotContain("stale_assignment", delivery.Flags);
             Assert.Contains("asn-fresh-1", delivery.AssignmentId);
+        }
+        finally
+        {
+            CleanupDatabase(databasePath);
+        }
+    }
+
+    [Fact]
+    public async Task PendingDelivery_HasGatewayUnclaimedWaterfall()
+    {
+        var (databasePath, database) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(databasePath, "hermes_profile", "r1", "my-agent", null, "den-proj", "runner",
+                "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+            await SeedDeliveryAsync(databasePath, "my-agent", "den-proj", "pending",
+                dedupeKey: "dedupe:waterfall:unclaimed", createdAt: TestNow.AddMinutes(-10));
+
+            var service = new GatewayStateOverviewService(database);
+            var request = new GatewayStateOverviewRequest(AgentIdentity: "my-agent");
+            var result = await service.GetGatewayStateOverviewAsync(request, TestNow);
+
+            var group = Assert.Single(result.Groups);
+            var delivery = Assert.Single(group.CurrentDeliveries);
+            Assert.NotNull(delivery.Waterfall);
+            Assert.Equal("gateway_unclaimed", delivery.Waterfall.StatusLabel);
+            Assert.Null(delivery.Waterfall.ClaimedAt);
+            Assert.Null(delivery.Waterfall.FirstCallbackAt);
+            Assert.Null(delivery.Waterfall.CompletedAt);
+            Assert.Null(delivery.Waterfall.ProviderTiming);
+            Assert.Null(delivery.Waterfall.SuppressionReason);
+        }
+        finally
+        {
+            CleanupDatabase(databasePath);
+        }
+    }
+
+    [Fact]
+    public async Task ClaimedWithoutCallback_HasBridgeClaimedWaitingRuntimeWaterfallWithProviderUnavailable()
+    {
+        var (databasePath, database) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(databasePath, "hermes_profile", "r1", "my-agent", null, "den-proj", "runner",
+                "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+            // Seed a delivering delivery with a claimed_at timestamp but no attempt observed_at
+            var createdAt = TestNow.AddMinutes(-10);
+            var claimedAt = TestNow.AddMinutes(-8);
+            await using var connection = new SqliteConnection($"Data Source={databasePath}");
+            await connection.OpenAsync();
+            await using var insert = connection.CreateCommand();
+            insert.CommandText = """
+                INSERT INTO delivery_requests (
+                    source_kind, target_type, target_identity, project_id, delivery_mode, priority,
+                    status, dedupe_key, attempt_count, cascade_depth,
+                    lease_expires_at, claimed_at, created_at, updated_at
+                ) VALUES (
+                    'test', 'agent', $target, $project, 'wake', 2,
+                    'delivering', $dedupe, 1, 0,
+                    $lease, $claimed, $created, $updated
+                )
+                """;
+            insert.Parameters.AddWithValue("$target", "my-agent");
+            insert.Parameters.AddWithValue("$project", "den-proj");
+            insert.Parameters.AddWithValue("$dedupe", "dedupe:waterfall:claimed");
+            insert.Parameters.AddWithValue("$lease", TestNow.AddMinutes(10).ToString("O"));
+            insert.Parameters.AddWithValue("$claimed", claimedAt.ToString("O"));
+            insert.Parameters.AddWithValue("$created", createdAt.ToString("O"));
+            insert.Parameters.AddWithValue("$updated", claimedAt.ToString("O"));
+            await insert.ExecuteNonQueryAsync();
+
+            var service = new GatewayStateOverviewService(database);
+            var request = new GatewayStateOverviewRequest(AgentIdentity: "my-agent");
+            var result = await service.GetGatewayStateOverviewAsync(request, TestNow);
+
+            var group = Assert.Single(result.Groups);
+            var delivery = Assert.Single(group.CurrentDeliveries);
+            Assert.NotNull(delivery.Waterfall);
+            Assert.Equal("bridge_claimed_waiting_runtime", delivery.Waterfall.StatusLabel);
+            Assert.Equal(claimedAt, delivery.Waterfall.ClaimedAt);
+            Assert.Null(delivery.Waterfall.FirstCallbackAt);
+            Assert.NotNull(delivery.Waterfall.GatewaySpanMs);
+            Assert.True(delivery.Waterfall.GatewaySpanMs > 0);
+            Assert.Null(delivery.Waterfall.BridgeSpanMs);
+            Assert.Equal("provider_timing_unavailable", delivery.Waterfall.ProviderTiming);
+        }
+        finally
+        {
+            CleanupDatabase(databasePath);
+        }
+    }
+
+    [Fact]
+    public async Task DeliveredWithFirstCallback_HasPartialWaterfall()
+    {
+        var (databasePath, database) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(databasePath, "hermes_profile", "r1", "my-agent", null, "den-proj", "runner",
+                "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+
+            var createdAt = TestNow.AddMinutes(-15);
+            var claimedAt = TestNow.AddMinutes(-13);
+            var observedAt = TestNow.AddMinutes(-10);
+
+            // Seed delivery with claimed_at and a delivery_attempt with observed_at
+            await using var connection = new SqliteConnection($"Data Source={databasePath}");
+            await connection.OpenAsync();
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO delivery_requests (
+                    source_kind, target_type, target_identity, project_id, delivery_mode, priority,
+                    status, dedupe_key, attempt_count, cascade_depth,
+                    lease_expires_at, claimed_at, created_at, updated_at
+                ) VALUES (
+                    'test', 'agent', $target, $project, 'wake', 2,
+                    'delivered', $dedupe, 1, 0,
+                    $lease, $claimed, $created, $updated
+                )
+                """;
+            cmd.Parameters.AddWithValue("$target", "my-agent");
+            cmd.Parameters.AddWithValue("$project", "den-proj");
+            cmd.Parameters.AddWithValue("$dedupe", "dedupe:waterfall:delivered");
+            cmd.Parameters.AddWithValue("$lease", DBNull.Value);
+            cmd.Parameters.AddWithValue("$claimed", claimedAt.ToString("O"));
+            cmd.Parameters.AddWithValue("$created", createdAt.ToString("O"));
+            cmd.Parameters.AddWithValue("$updated", observedAt.ToString("O"));
+            await cmd.ExecuteNonQueryAsync();
+
+            // Add a delivery attempt with observed_at
+            await using var attemptCmd = connection.CreateCommand();
+            attemptCmd.CommandText = """
+                INSERT INTO delivery_attempts (
+                    delivery_request_id, adapter_binding_id, attempt_number, status,
+                    ack_kind, external_message_id, session_id, observed_at, payload_json, created_at
+                ) VALUES (
+                    (SELECT id FROM delivery_requests WHERE dedupe_key = $dedupe),
+                    (SELECT id FROM gateway_adapter_bindings WHERE agent_identity = 'my-agent' LIMIT 1),
+                    1, 'delivered',
+                    'bridge_delivered', 'ext-1', 'session-1', $observed, '{}', $created
+                )
+                """;
+            attemptCmd.Parameters.AddWithValue("$dedupe", "dedupe:waterfall:delivered");
+            attemptCmd.Parameters.AddWithValue("$observed", observedAt.ToString("O"));
+            attemptCmd.Parameters.AddWithValue("$created", claimedAt.ToString("O"));
+            await attemptCmd.ExecuteNonQueryAsync();
+
+            var service = new GatewayStateOverviewService(database);
+            var request = new GatewayStateOverviewRequest(AgentIdentity: "my-agent");
+            var result = await service.GetGatewayStateOverviewAsync(request, TestNow);
+
+            var group = Assert.Single(result.Groups);
+            var delivery = Assert.Single(group.CurrentDeliveries);
+            Assert.NotNull(delivery.Waterfall);
+            Assert.Equal("delivered_waiting_ack_or_complete", delivery.Waterfall.StatusLabel);
+            Assert.Equal(claimedAt, delivery.Waterfall.ClaimedAt);
+            Assert.Equal(observedAt, delivery.Waterfall.FirstCallbackAt);
+            Assert.Null(delivery.Waterfall.CompletedAt);
+            Assert.NotNull(delivery.Waterfall.GatewaySpanMs);
+            Assert.True(delivery.Waterfall.GatewaySpanMs > 0);
+            Assert.NotNull(delivery.Waterfall.BridgeSpanMs);
+            Assert.True(delivery.Waterfall.BridgeSpanMs > 0);
+            Assert.Null(delivery.Waterfall.RuntimeSpanMs);
+            Assert.Equal("provider_timing_unavailable", delivery.Waterfall.ProviderTiming);
+        }
+        finally
+        {
+            CleanupDatabase(databasePath);
+        }
+    }
+
+    [Fact]
+    public async Task CompletedDelivery_HasFullWaterfallWithCallbackPersisted()
+    {
+        var (databasePath, database) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(databasePath, "hermes_profile", "r1", "my-agent", null, "den-proj", "runner",
+                "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+
+            var createdAt = TestNow.AddMinutes(-20);
+            var claimedAt = TestNow.AddMinutes(-18);
+            var observedAt = TestNow.AddMinutes(-15);
+            var completedAt = TestNow.AddMinutes(-10);
+
+            await using var connection = new SqliteConnection($"Data Source={databasePath}");
+            await connection.OpenAsync();
+
+            // Seed completed delivery with claimed_at and completed_at
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO delivery_requests (
+                    source_kind, target_type, target_identity, project_id, delivery_mode, priority,
+                    status, dedupe_key, attempt_count, cascade_depth,
+                    claimed_at, completed_at, created_at, updated_at
+                ) VALUES (
+                    'test', 'agent', $target, $project, 'wake', 2,
+                    'completed', $dedupe, 1, 0,
+                    $claimed, $completed, $created, $updated
+                )
+                """;
+            cmd.Parameters.AddWithValue("$target", "my-agent");
+            cmd.Parameters.AddWithValue("$project", "den-proj");
+            cmd.Parameters.AddWithValue("$dedupe", "dedupe:waterfall:completed");
+            cmd.Parameters.AddWithValue("$claimed", claimedAt.ToString("O"));
+            cmd.Parameters.AddWithValue("$completed", completedAt.ToString("O"));
+            cmd.Parameters.AddWithValue("$created", createdAt.ToString("O"));
+            cmd.Parameters.AddWithValue("$updated", completedAt.ToString("O"));
+            await cmd.ExecuteNonQueryAsync();
+
+            // Add a delivery attempt with observed_at
+            await using var attemptCmd = connection.CreateCommand();
+            attemptCmd.CommandText = """
+                INSERT INTO delivery_attempts (
+                    delivery_request_id, adapter_binding_id, attempt_number, status,
+                    ack_kind, external_message_id, session_id, observed_at, payload_json, created_at
+                ) VALUES (
+                    (SELECT id FROM delivery_requests WHERE dedupe_key = $dedupe),
+                    (SELECT id FROM gateway_adapter_bindings WHERE agent_identity = 'my-agent' LIMIT 1),
+                    1, 'completed',
+                    'completed', 'ext-complete', 'session-complete', $observed, '{}', $created
+                )
+                """;
+            attemptCmd.Parameters.AddWithValue("$dedupe", "dedupe:waterfall:completed");
+            attemptCmd.Parameters.AddWithValue("$observed", observedAt.ToString("O"));
+            attemptCmd.Parameters.AddWithValue("$created", claimedAt.ToString("O"));
+            await attemptCmd.ExecuteNonQueryAsync();
+
+            var service = new GatewayStateOverviewService(database);
+            var request = new GatewayStateOverviewRequest(AgentIdentity: "my-agent", IncludeTerminalMinutes: 120);
+            var result = await service.GetGatewayStateOverviewAsync(request, TestNow);
+
+            var group = Assert.Single(result.Groups);
+            var delivery = Assert.Single(group.RecentDeliveries);
+            Assert.NotNull(delivery.Waterfall);
+            Assert.Equal("callback_persisted", delivery.Waterfall.StatusLabel);
+            Assert.Equal(claimedAt, delivery.Waterfall.ClaimedAt);
+            Assert.Equal(observedAt, delivery.Waterfall.FirstCallbackAt);
+            Assert.Equal(completedAt, delivery.Waterfall.CompletedAt);
+            Assert.NotNull(delivery.Waterfall.GatewaySpanMs);
+            Assert.NotNull(delivery.Waterfall.BridgeSpanMs);
+            Assert.NotNull(delivery.Waterfall.RuntimeSpanMs);
+            Assert.True(delivery.Waterfall.GatewaySpanMs > 0);
+            Assert.True(delivery.Waterfall.BridgeSpanMs > 0);
+            Assert.True(delivery.Waterfall.RuntimeSpanMs > 0);
+            Assert.Equal("provider_timing_unavailable", delivery.Waterfall.ProviderTiming);
+        }
+        finally
+        {
+            CleanupDatabase(databasePath);
+        }
+    }
+
+    [Fact]
+    public async Task SuppressedDelivery_HasSuppressedWaterfallWithReason()
+    {
+        var (databasePath, database) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(databasePath, "hermes_profile", "r1", "my-agent", null, "den-proj", "runner",
+                "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+
+            await using var connection = new SqliteConnection($"Data Source={databasePath}");
+            await connection.OpenAsync();
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO delivery_requests (
+                    source_kind, target_type, target_identity, project_id, delivery_mode, priority,
+                    status, dedupe_key, suppression_reason, attempt_count, cascade_depth, created_at, updated_at
+                ) VALUES (
+                    'test', 'agent', $target, $project, 'notify', 3,
+                    'suppressed', $dedupe, $reason, 0, 0, $created, $created
+                )
+                """;
+            cmd.Parameters.AddWithValue("$target", "my-agent");
+            cmd.Parameters.AddWithValue("$project", "den-proj");
+            cmd.Parameters.AddWithValue("$dedupe", "dedupe:waterfall:suppressed");
+            cmd.Parameters.AddWithValue("$reason", "agent_tennis_without_reset");
+            cmd.Parameters.AddWithValue("$created", TestNow.AddMinutes(-30).ToString("O"));
+            await cmd.ExecuteNonQueryAsync();
+
+            var service = new GatewayStateOverviewService(database);
+            var request = new GatewayStateOverviewRequest(AgentIdentity: "my-agent", IncludeTerminalMinutes: 120);
+            var result = await service.GetGatewayStateOverviewAsync(request, TestNow);
+
+            var group = Assert.Single(result.Groups);
+            var delivery = Assert.Single(group.RecentDeliveries);
+            Assert.NotNull(delivery.Waterfall);
+            Assert.Equal("suppressed", delivery.Waterfall.StatusLabel);
+            Assert.Null(delivery.Waterfall.ClaimedAt);
+            Assert.Null(delivery.Waterfall.FirstCallbackAt);
+            Assert.Null(delivery.Waterfall.CompletedAt);
+            Assert.Null(delivery.Waterfall.GatewaySpanMs);
+            Assert.Null(delivery.Waterfall.BridgeSpanMs);
+            Assert.Null(delivery.Waterfall.RuntimeSpanMs);
+            Assert.Equal("agent_tennis_without_reset", delivery.Waterfall.SuppressionReason);
+            Assert.Null(delivery.Waterfall.ProviderTiming);
         }
         finally
         {

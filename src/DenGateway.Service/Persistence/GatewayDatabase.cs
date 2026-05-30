@@ -43,6 +43,9 @@ public sealed class GatewayDatabase
         await EnsureColumnAsync(connection, "delivery_requests", "worker_identity", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "delivery_requests", "worker_role", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "delivery_requests", "assignment_purpose", "TEXT NULL", cancellationToken);
+        // Delivery latency waterfall columns
+        await EnsureColumnAsync(connection, "delivery_requests", "claimed_at", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(connection, "delivery_requests", "completed_at", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "delivery_attempts", "ack_kind", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "delivery_attempts", "external_message_id", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "delivery_attempts", "session_id", "TEXT NULL", cancellationToken);
@@ -429,7 +432,8 @@ public sealed class GatewayDatabase
                     SET status = $status,
                         updated_at = $updated_at,
                         lease_expires_at = NULL,
-                        next_attempt_at = $next_attempt_at
+                        next_attempt_at = $next_attempt_at,
+                        completed_at = CASE WHEN $status IN ('completed', 'failed', 'expired') THEN $updated_at ELSE completed_at END
                     WHERE id = $id;
                     """;
                 updateRequest.Parameters.AddWithValue("$status", requestStatus);
@@ -606,11 +610,13 @@ public sealed class GatewayDatabase
             SET status = 'delivering',
                 attempt_count = $attempt_count,
                 lease_expires_at = $lease_expires_at,
+                claimed_at = $claimed_at,
                 updated_at = $updated_at
             WHERE id = $id AND status = 'pending';
             """;
         command.Parameters.AddWithValue("$attempt_count", attemptNumber);
         command.Parameters.AddWithValue("$lease_expires_at", leaseExpiresAt.ToString("O"));
+        command.Parameters.AddWithValue("$claimed_at", claimedAt.ToString("O"));
         command.Parameters.AddWithValue("$updated_at", claimedAt.ToString("O"));
         command.Parameters.AddWithValue("$id", deliveryRequestId);
         return await command.ExecuteNonQueryAsync(cancellationToken) == 1;

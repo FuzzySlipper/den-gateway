@@ -192,6 +192,56 @@ def main() -> int:
     evidence["gateway_complete"] = complete
     print_step("hermes-style ack/complete", complete)
 
+    # Waterfall diagnostics: query the Gateway state overview for this delivery
+    # and print a latency waterfall table if waterfall data is available.
+    state_query = urllib.parse.urlencode({
+        "projectId": args.project_id,
+        "agentIdentity": args.target_agent,
+        "role": args.target_role,
+        "includeTerminalMinutes": "60",
+        "limit": "20",
+    })
+    gateway_state = as_dict(request_json(
+        "GET", f"{gateway_url}/api/agent-overview/gateway-state?{state_query}",
+    ), "Gateway state overview")
+
+    if gateway_state and gateway_state.get("agents"):
+        agent = gateway_state["agents"][0]
+        all_deliveries = (agent.get("currentDeliveries") or []) + (agent.get("recentDeliveries") or [])
+        target = next((d for d in all_deliveries if d.get("deliveryRequestId") == delivery_id), None)
+        if target and target.get("waterfall"):
+            wf = target["waterfall"]
+            print("\n## Delivery Latency Waterfall")
+            print(f"  Status label:          {wf.get('statusLabel')}")
+            print(f"  Provider timing:       {wf.get('providerTiming') or 'n/a'}")
+            print(f"  Suppression reason:    {wf.get('suppressionReason') or 'n/a'}")
+            print(f"  Created at:            {wf.get('createdAt')}")
+            print(f"  Claimed at:            {wf.get('claimedAt') or '—'}")
+            print(f"  First callback at:     {wf.get('firstCallbackAt') or '—'}")
+            print(f"  Completed at:          {wf.get('completedAt') or '—'}")
+            print(f"  ├─ gatewaySpanMs:      {wf.get('gatewaySpanMs') or '—'} ms  (creation → claim)")
+            print(f"  ├─ bridgeSpanMs:       {wf.get('bridgeSpanMs') or '—'} ms  (claim → first callback)")
+            print(f"  ├─ runtimeSpanMs:      {wf.get('runtimeSpanMs') or '—'} ms  (first callback → terminal)")
+            print(f"  └─ callbackPersisted:  {wf.get('callbackPersistedSpanMs') or '—'} ms")
+            print()
+            # Identify dominant component
+            spans = [
+                ("gateway", wf.get("gatewaySpanMs")),
+                ("bridge/runtime", wf.get("bridgeSpanMs")),
+                ("runtime", wf.get("runtimeSpanMs")),
+            ]
+            valid = [(name, ms) for name, ms in spans if ms is not None]
+            if valid:
+                dominant = max(valid, key=lambda x: x[1])
+                print(f"  >> Dominant span: {dominant[0]} ({dominant[1]} ms)")
+            evidence["gateway_waterfall"] = wf
+        else:
+            print("\n## Delivery Latency Waterfall — not available (no waterfall data for this delivery)")
+            evidence["gateway_waterfall"] = {"status": "not_available"}
+    else:
+        print("\n## Delivery Latency Waterfall — not available (no agent group in Gateway state)")
+        evidence["gateway_waterfall"] = {"status": "not_available"}
+
     print("\nPASS visible-agent smoke completed")
     print(json.dumps(evidence, indent=2, sort_keys=True))
     return 0

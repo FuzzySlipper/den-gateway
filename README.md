@@ -145,3 +145,63 @@ If Kestrel chooses a different development URL, use the URL printed by `dotnet r
 - Consume Den Core and Den Channels through explicit HTTP/event contracts.
 - When a new canonical Den state/API capability is needed, create a task in the owning `den-core` Den project instead of routing it through the historical `den-mcp` project.
 - Keep Hermes-specific delivery mechanics in a thin bridge/adapter; Gateway owns routing and delivery state.
+
+## Runbook: diagnosing sluggish direct-agent/channel delivery
+
+### Waterfall evidence
+
+Every delivery shown in `GET /api/agent-overview/gateway-state` now carries an optional `waterfall` block. It decomposes per-message delivery latency into Gateway-owned phases:
+
+```
+waterfall:
+  statusLabel:        callback_persisted       # see labels below
+  providerTiming:     provider_timing_unavailable
+  gatewaySpanMs:      245.3                    # creation → claim (ms)
+  bridgeSpanMs:       1240.8                   # claim → first callback (ms)
+  runtimeSpanMs:      5230.1                   # first callback → terminal (ms)
+  callbackPersistedSpanMs: null                # not yet computed from persisted delta
+```
+
+### Status labels
+
+| Label | Meaning |
+|---|---|
+| `gateway_unclaimed` | Delivery was created but no Hermes/bridge adapter has claimed it yet. The bottleneck is either the adapter's claim polling interval or the lease claim logic. |
+| `bridge_claimed_waiting_runtime` | Claimed by an adapter but no delivery/delivery callback received yet. If this persists (>>30s), the adapter may be slow processing or the runtime may have dropped the work. |
+| `delivering_with_first_reply` | First callback (delivered/ack) received; waiting for terminal completion. |
+| `delivered_waiting_ack_or_complete` | Bridge delivered the message to the provider; awaiting acknowledgement or tool-execution completion. |
+| `acknowledged_waiting_complete` | Provider acked; awaiting final completion from the runtime. |
+| `callback_persisted` | Full terminal state reached; the waterfall shows the complete timing chain. |
+| `suppressed` | Not a latency issue — policy decided not to deliver. Check `suppressionReason`. |
+| `terminal_unclaimed` | Terminal state (complete/fail/expire) without ever being claimed — likely a timeout expiry before any adapter picked it up. |
+| `terminal_no_first_reply` | Terminal without any intermediate callback — the claim happened but the first delivery/ack callback was skipped. |
+
+### Provider timing
+
+**`providerTiming: "provider_timing_unavailable"`** appears on every non-suppressed waterfall where provider-level telemetry (model inference, tool execution) is absent. This is not a bug — the Gateway does not own runtime/provider instrumentation. When provider-phase timing is needed, the responsible party is the runtime/adapter (e.g. Hermes runtime, OpenCode, Claude Code), which should emit its own span data through its own telemetry channels. Do not blend bridge/runtime spans with provider inference time.
+
+### Dominant span identification
+
+In the smoke script output (`live-visible-agent-smoke.py`), a dominant span is printed as `>> Dominant span: <phase> (<ms> ms)`. Use this to identify the bottleneck:
+
+- **gateway** (high `gatewaySpanMs`): the Gateway delivery loop or claim system is slow. Check poll intervals, cursor lag, or adapter heartbeat frequency.
+- **bridge/runtime** (high `bridgeSpanMs`): the adapter, Hermes runtime, or provider took long to send the first callback. Check adapter logs, runtime scheduling delays, or provider cold-start.
+- **runtime** (high `runtimeSpanMs`): the execution from first token to completion was long. This is the expected time for the tool/agent to produce the final result.
+
+### Per-message table
+
+A repeated `agent-tennis` or `direct-agent` round can produce a small table of per-message spans by querying the Gateway state endpoint after each round:
+
+```bash
+curl -s 'http://127.0.0.1:5000/api/agent-overview/gateway-state?projectId=den-gateway&agentIdentity=<target>&includeTerminalMinutes=480' \
+  | jq '.agents[].recentDeliveries[] | {id: .deliveryRequestId, status: .status, label: .waterfall.statusLabel, gateway: .waterfall.gatewaySpanMs, bridge: .waterfall.bridgeSpanMs, runtime: .waterfall.runtimeSpanMs}'
+```
+
+Expected output for a healthy exchange:
+
+```
+{"id": 101, "status": "completed", "label": "callback_persisted", "gateway": 12.5, "bridge": 340.2, "runtime": 5230.1}
+{"id": 102, "status": "completed", "label": "callback_persisted", "gateway": 8.3, "bridge": 280.7, "runtime": 4120.9}
+```
+
+Large `gateway` spans on fresh deliveries suggest cold-start cursor seeding or loop delay. Large `bridge` spans suggest runtime warmup or provider cold-start. Large `runtime` spans are the actual tool response time. `suppressed` entries indicate policy filtering, not latency.

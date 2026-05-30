@@ -125,7 +125,8 @@ public sealed record GatewayDeliveryOverview(
     [property: JsonPropertyName("assignmentId")] string? AssignmentId = null,
     [property: JsonPropertyName("workerIdentity")] string? WorkerIdentity = null,
     [property: JsonPropertyName("workerRole")] string? WorkerRole = null,
-    [property: JsonPropertyName("assignmentPurpose")] string? AssignmentPurpose = null);
+    [property: JsonPropertyName("assignmentPurpose")] string? AssignmentPurpose = null,
+    [property: JsonPropertyName("waterfall")] DeliveryWaterfall? Waterfall = null);
 
 public sealed record GatewayDeliveryAttemptOverview(
     [property: JsonPropertyName("attemptId")] long AttemptId,
@@ -138,3 +139,21 @@ public sealed record GatewayDeliveryAttemptOverview(
     [property: JsonPropertyName("observedAt")] DateTimeOffset? ObservedAt,
     [property: JsonPropertyName("errorCode")] string? ErrorCode,
     [property: JsonPropertyName("errorMessage")] string? ErrorMessage);
+
+/// <summary>
+/// Delivery latency waterfall phases for direct-agent/channel delivery diagnostics.
+/// Each span is measured in milliseconds between the available timestamps.
+/// Phases without telemetry are explicitly marked rather than blended.
+/// </summary>
+public sealed record DeliveryWaterfall(
+    [property: JsonPropertyName("statusLabel")] string StatusLabel,
+    [property: JsonPropertyName("createdAt")] DateTimeOffset CreatedAt,
+    [property: JsonPropertyName("claimedAt")] DateTimeOffset? ClaimedAt,
+    [property: JsonPropertyName("firstCallbackAt")] DateTimeOffset? FirstCallbackAt,
+    [property: JsonPropertyName("completedAt")] DateTimeOffset? CompletedAt,
+    [property: JsonPropertyName("gatewaySpanMs")] double? GatewaySpanMs,
+    [property: JsonPropertyName("bridgeSpanMs")] double? BridgeSpanMs,
+    [property: JsonPropertyName("runtimeSpanMs")] double? RuntimeSpanMs,
+    [property: JsonPropertyName("callbackPersistedSpanMs")] double? CallbackPersistedSpanMs,
+    [property: JsonPropertyName("providerTiming")] string? ProviderTiming,
+    [property: JsonPropertyName("suppressionReason")] string? SuppressionReason);

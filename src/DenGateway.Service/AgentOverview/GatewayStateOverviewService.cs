@@ -42,12 +42,12 @@ public sealed class GatewayStateOverviewService
 
         var groupedBindings = bindings
             .GroupBy(b => (b.ProjectId, b.AgentIdentity, b.Role))
-            .ToDictionary(g => g.Key, g => g.OrderByDescending(IsFreshBinding).ThenByDescending(b => b.LastSeenAt).ToList());
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(b => IsFreshBinding(b, now)).ThenByDescending(b => b.LastSeenAt).ToList());
 
         var bindingByProjectAgent = bindings
             .Where(b => b.AgentIdentity is not null)
             .GroupBy(b => (b.ProjectId, b.AgentIdentity))
-            .ToDictionary(g => g.Key, g => g.OrderByDescending(IsFreshBinding).ThenByDescending(b => b.LastSeenAt).First());
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(b => IsFreshBinding(b, now)).ThenByDescending(b => b.LastSeenAt).First());
 
         var deliveryGroups = new Dictionary<(string? ProjectId, string? AgentIdentity, string? Role), List<DeliveryRow>>();
         foreach (var delivery in deliveries)
@@ -87,7 +87,7 @@ public sealed class GatewayStateOverviewService
             {
                 fallbackBindings = bindings
                     .Where(b => string.Equals(b.ProjectId, key.ProjectId, StringComparison.Ordinal) && string.Equals(b.AgentIdentity, key.AgentIdentity, StringComparison.Ordinal))
-                    .OrderByDescending(IsFreshBinding)
+                    .OrderByDescending(b => IsFreshBinding(b, now))
                     .ThenByDescending(b => b.LastSeenAt)
                     .ToList();
             }
@@ -100,7 +100,7 @@ public sealed class GatewayStateOverviewService
             var flags = new List<string>();
             if (fallbackBindings.Count == 0 && groupDeliveries.Count > 0)
                 flags.Add("missing_binding");
-            if (fallbackBindings.Count > 0 && fallbackBindings.All(b => !IsFreshBinding(b)))
+            if (fallbackBindings.Count > 0 && fallbackBindings.All(b => !IsFreshBinding(b, now)))
                 flags.Add("stale_binding");
 
             var state = ClassifyGroup(fallbackBindings, groupDeliveries, now);
@@ -118,7 +118,7 @@ public sealed class GatewayStateOverviewService
                 Flags: flags));
         }
 
-        var freshCount = bindings.Count(IsFreshBinding);
+        var freshCount = bindings.Count(b => IsFreshBinding(b, now));
         var staleCount = bindings.Count - freshCount;
         var bindingHealthStatus = staleCount > 0 && freshCount > 0 ? "degraded" : "available";
         if (bindings.Count == 0)
@@ -200,7 +200,200 @@ public sealed class GatewayStateOverviewService
             AssignmentId: delivery.AssignmentId,
             WorkerIdentity: delivery.WorkerIdentity,
             WorkerRole: delivery.WorkerRole,
-            AssignmentPurpose: delivery.AssignmentPurpose);
+            AssignmentPurpose: delivery.AssignmentPurpose,
+            Waterfall: BuildWaterfall(delivery));
+    }
+
+    /// <summary>
+    /// Compute a delivery latency waterfall from available timestamp evidence.
+    /// Phases without provider/Channels telemetry are explicitly labelled
+    /// provider_timing_unavailable rather than blended into bridge or runtime spans.
+    /// </summary>
+    private static DeliveryWaterfall? BuildWaterfall(DeliveryRow delivery)
+    {
+        var status = delivery.Status;
+        var createdAt = delivery.CreatedAt;
+
+        // Suppressed deliveries have no claim/callback timeline.
+        if (status == "suppressed")
+        {
+            return new DeliveryWaterfall(
+                StatusLabel: "suppressed",
+                CreatedAt: createdAt,
+                ClaimedAt: null,
+                FirstCallbackAt: null,
+                CompletedAt: null,
+                GatewaySpanMs: null,
+                BridgeSpanMs: null,
+                RuntimeSpanMs: null,
+                CallbackPersistedSpanMs: null,
+                ProviderTiming: null,
+                SuppressionReason: delivery.SuppressionReason);
+        }
+
+        // Pending deliveries have never been claimed.
+        if (status is "pending" or "delivering" or "delivered" or "acknowledged")
+        {
+            var claimedAt = delivery.ClaimedAt;
+            if (claimedAt is null)
+            {
+                // Never claimed
+                return new DeliveryWaterfall(
+                    StatusLabel: "gateway_unclaimed",
+                    CreatedAt: createdAt,
+                    ClaimedAt: null,
+                    FirstCallbackAt: null,
+                    CompletedAt: null,
+                    GatewaySpanMs: null,
+                    BridgeSpanMs: null,
+                    RuntimeSpanMs: null,
+                    CallbackPersistedSpanMs: null,
+                    ProviderTiming: null,
+                    SuppressionReason: null);
+            }
+
+            var gatewaySpanMs = (claimedAt.Value - createdAt).TotalMilliseconds;
+            var firstCallbackAt = delivery.LastAttempt?.ObservedAt;
+
+            if (firstCallbackAt is null)
+            {
+                // Claimed but no callback yet
+                return new DeliveryWaterfall(
+                    StatusLabel: "bridge_claimed_waiting_runtime",
+                    CreatedAt: createdAt,
+                    ClaimedAt: claimedAt,
+                    FirstCallbackAt: null,
+                    CompletedAt: null,
+                    GatewaySpanMs: Math.Round(gatewaySpanMs, 1),
+                    BridgeSpanMs: null,
+                    RuntimeSpanMs: null,
+                    CallbackPersistedSpanMs: null,
+                    ProviderTiming: "provider_timing_unavailable",
+                    SuppressionReason: null);
+            }
+
+            var bridgeSpanMs = (firstCallbackAt.Value - claimedAt.Value).TotalMilliseconds;
+            var completedAt = delivery.CompletedAt;
+
+            if (completedAt is null)
+            {
+                // Have first callback but not yet complete
+                return new DeliveryWaterfall(
+                    StatusLabel: status switch
+                    {
+                        "delivering" => "delivering_with_first_reply",
+                        "delivered" => "delivered_waiting_ack_or_complete",
+                        "acknowledged" => "acknowledged_waiting_complete",
+                        _ => "bridge_claimed_waiting_runtime"
+                    },
+                    CreatedAt: createdAt,
+                    ClaimedAt: claimedAt,
+                    FirstCallbackAt: firstCallbackAt,
+                    CompletedAt: null,
+                    GatewaySpanMs: Math.Round(gatewaySpanMs, 1),
+                    BridgeSpanMs: Math.Round(bridgeSpanMs, 1),
+                    RuntimeSpanMs: null,
+                    CallbackPersistedSpanMs: null,
+                    ProviderTiming: "provider_timing_unavailable",
+                    SuppressionReason: null);
+            }
+
+            // Full timeline
+            var runtimeSpanMs = (completedAt.Value - firstCallbackAt.Value).TotalMilliseconds;
+            return new DeliveryWaterfall(
+                StatusLabel: "callback_persisted",
+                CreatedAt: createdAt,
+                ClaimedAt: claimedAt,
+                FirstCallbackAt: firstCallbackAt,
+                CompletedAt: completedAt,
+                GatewaySpanMs: Math.Round(gatewaySpanMs, 1),
+                BridgeSpanMs: Math.Round(bridgeSpanMs, 1),
+                RuntimeSpanMs: Math.Round(runtimeSpanMs, 1),
+                CallbackPersistedSpanMs: null,
+                ProviderTiming: "provider_timing_unavailable",
+                SuppressionReason: null);
+        }
+
+        // Terminal states (completed, failed, expired)
+        {
+            var claimedAt = delivery.ClaimedAt;
+            var completedAt = delivery.CompletedAt ?? delivery.UpdatedAt;
+            var firstCallbackAt = delivery.LastAttempt?.ObservedAt;
+
+            if (claimedAt is null && firstCallbackAt is null)
+            {
+                return new DeliveryWaterfall(
+                    StatusLabel: "terminal_unclaimed",
+                    CreatedAt: createdAt,
+                    ClaimedAt: null,
+                    FirstCallbackAt: null,
+                    CompletedAt: completedAt,
+                    GatewaySpanMs: null,
+                    BridgeSpanMs: null,
+                    RuntimeSpanMs: null,
+                    CallbackPersistedSpanMs: null,
+                    ProviderTiming: null,
+                    SuppressionReason: null);
+            }
+
+            if (claimedAt is not null && firstCallbackAt is null)
+            {
+                var gatewaySpanMs = (claimedAt.Value - createdAt).TotalMilliseconds;
+                var runtimeSpanMs = (completedAt - claimedAt.Value).TotalMilliseconds;
+                return new DeliveryWaterfall(
+                    StatusLabel: "terminal_no_first_reply",
+                    CreatedAt: createdAt,
+                    ClaimedAt: claimedAt,
+                    FirstCallbackAt: null,
+                    CompletedAt: completedAt,
+                    GatewaySpanMs: Math.Round(gatewaySpanMs, 1),
+                    BridgeSpanMs: null,
+                    RuntimeSpanMs: Math.Round(runtimeSpanMs, 1),
+                    CallbackPersistedSpanMs: null,
+                    ProviderTiming: "provider_timing_unavailable",
+                    SuppressionReason: null);
+            }
+
+            if (claimedAt is null)
+            {
+                // Only have first callback but no claim recorded
+                return new DeliveryWaterfall(
+                    StatusLabel: status,
+                    CreatedAt: createdAt,
+                    ClaimedAt: null,
+                    FirstCallbackAt: firstCallbackAt,
+                    CompletedAt: completedAt,
+                    GatewaySpanMs: null,
+                    BridgeSpanMs: null,
+                    RuntimeSpanMs: (firstCallbackAt is not null) ? Math.Round((completedAt - firstCallbackAt.Value).TotalMilliseconds, 1) : null,
+                    CallbackPersistedSpanMs: null,
+                    ProviderTiming: "provider_timing_unavailable",
+                    SuppressionReason: null);
+            }
+
+            // Full timeline
+            var gwMs = (claimedAt.Value - createdAt).TotalMilliseconds;
+            var brMs = (firstCallbackAt!.Value - claimedAt.Value).TotalMilliseconds;
+            var rtMs = (completedAt - firstCallbackAt.Value).TotalMilliseconds;
+            return new DeliveryWaterfall(
+                StatusLabel: status switch
+                {
+                    "completed" => "callback_persisted",
+                    "failed" => "failed_after_callback",
+                    "expired" => "expired_after_claim",
+                    _ => "terminal"
+                },
+                CreatedAt: createdAt,
+                ClaimedAt: claimedAt,
+                FirstCallbackAt: firstCallbackAt,
+                CompletedAt: completedAt,
+                GatewaySpanMs: Math.Round(gwMs, 1),
+                BridgeSpanMs: Math.Round(brMs, 1),
+                RuntimeSpanMs: Math.Round(rtMs, 1),
+                CallbackPersistedSpanMs: null,
+                ProviderTiming: "provider_timing_unavailable",
+                SuppressionReason: null);
+        }
     }
 
     private static DeliverySummaryCounts ComputeDeliveryCounts(List<DeliveryRow> deliveries, DateTimeOffset now, string state)
@@ -333,7 +526,10 @@ public sealed class GatewayStateOverviewService
         await using var command = connection.CreateCommand();
         command.CommandText = """
             SELECT dr.id, dr.project_id, dr.target_type, dr.target_identity, dr.status,
-                   dr.lease_expires_at, dr.created_at, dr.updated_at, dr.attempt_count,
+                   dr.suppression_reason,
+                   dr.lease_expires_at, dr.created_at, dr.updated_at,
+                   dr.claimed_at, dr.completed_at,
+                   dr.attempt_count,
                    dr.source_kind, dr.source_id, dr.source_project_id, dr.task_id, dr.channel_id,
                    dr.delivery_mode, dr.context_summary, dr.context_link, dr.next_attempt_at, dr.expires_at,
                    dr.assignment_id, dr.worker_identity, dr.worker_role, dr.assignment_purpose,
@@ -378,40 +574,43 @@ public sealed class GatewayStateOverviewService
             rows.Add(new DeliveryRow(
                 Id: reader.GetInt64(0),
                 ProjectId: reader.IsDBNull(1) ? null : reader.GetString(1),
-                TargetType: targetType,
-                TargetIdentity: targetIdentity,
+                TargetType: reader.GetString(2),
+                TargetIdentity: reader.GetString(3),
                 AgentIdentity: string.Equals(targetType, "agent", StringComparison.OrdinalIgnoreCase) ? targetIdentity : null,
                 Role: string.Equals(targetType, "role", StringComparison.OrdinalIgnoreCase) ? targetIdentity : null,
                 Status: reader.GetString(4),
-                LeaseExpiresAt: ReadDateTimeOffset(reader, 5),
-                CreatedAt: DateTimeOffset.Parse(reader.GetString(6), CultureInfo.InvariantCulture),
-                UpdatedAt: DateTimeOffset.Parse(reader.GetString(7), CultureInfo.InvariantCulture),
-                AttemptCount: reader.GetInt32(8),
-                SourceKind: reader.GetString(9),
-                SourceId: reader.IsDBNull(10) ? null : reader.GetString(10),
-                SourceProjectId: reader.IsDBNull(11) ? null : reader.GetString(11),
-                TaskId: reader.IsDBNull(12) ? null : reader.GetInt64(12),
-                ChannelId: reader.IsDBNull(13) ? null : reader.GetString(13),
-                DeliveryMode: reader.GetString(14),
-                ContextSummary: reader.IsDBNull(15) ? null : reader.GetString(15),
-                ContextLink: reader.IsDBNull(16) ? null : reader.GetString(16),
-                NextAttemptAt: ReadDateTimeOffset(reader, 17),
-                ExpiresAt: ReadDateTimeOffset(reader, 18),
-                AssignmentId: reader.IsDBNull(19) ? null : reader.GetString(19),
-                WorkerIdentity: reader.IsDBNull(20) ? null : reader.GetString(20),
-                WorkerRole: reader.IsDBNull(21) ? null : reader.GetString(21),
-                AssignmentPurpose: reader.IsDBNull(22) ? null : reader.GetString(22),
-                LastAttempt: reader.IsDBNull(23) ? null : new GatewayDeliveryAttemptOverview(
-                    AttemptId: reader.GetInt64(23),
-                    AttemptNumber: reader.GetInt32(24),
-                    AdapterBindingId: reader.IsDBNull(25) ? null : reader.GetInt64(25),
-                    Status: reader.GetString(26),
-                    AckKind: reader.IsDBNull(27) ? null : reader.GetString(27),
-                    ExternalMessageId: reader.IsDBNull(28) ? null : reader.GetString(28),
-                    SessionId: reader.IsDBNull(29) ? null : reader.GetString(29),
-                    ObservedAt: ReadDateTimeOffset(reader, 30),
-                    ErrorCode: reader.IsDBNull(31) ? null : reader.GetString(31),
-                    ErrorMessage: reader.IsDBNull(32) ? null : Truncate(reader.GetString(32), 240))));
+                SuppressionReason: reader.IsDBNull(5) ? null : reader.GetString(5),
+                LeaseExpiresAt: ReadDateTimeOffset(reader, 6),
+                CreatedAt: DateTimeOffset.Parse(reader.GetString(7), CultureInfo.InvariantCulture),
+                UpdatedAt: DateTimeOffset.Parse(reader.GetString(8), CultureInfo.InvariantCulture),
+                ClaimedAt: ReadDateTimeOffset(reader, 9),
+                CompletedAt: ReadDateTimeOffset(reader, 10),
+                AttemptCount: reader.GetInt32(11),
+                SourceKind: reader.GetString(12),
+                SourceId: reader.IsDBNull(13) ? null : reader.GetString(13),
+                SourceProjectId: reader.IsDBNull(14) ? null : reader.GetString(14),
+                TaskId: reader.IsDBNull(15) ? null : reader.GetInt64(15),
+                ChannelId: reader.IsDBNull(16) ? null : reader.GetString(16),
+                DeliveryMode: reader.GetString(17),
+                ContextSummary: reader.IsDBNull(18) ? null : reader.GetString(18),
+                ContextLink: reader.IsDBNull(19) ? null : reader.GetString(19),
+                NextAttemptAt: ReadDateTimeOffset(reader, 20),
+                ExpiresAt: ReadDateTimeOffset(reader, 21),
+                AssignmentId: reader.IsDBNull(22) ? null : reader.GetString(22),
+                WorkerIdentity: reader.IsDBNull(23) ? null : reader.GetString(23),
+                WorkerRole: reader.IsDBNull(24) ? null : reader.GetString(24),
+                AssignmentPurpose: reader.IsDBNull(25) ? null : reader.GetString(25),
+                LastAttempt: reader.IsDBNull(26) ? null : new GatewayDeliveryAttemptOverview(
+                    AttemptId: reader.GetInt64(26),
+                    AttemptNumber: reader.GetInt32(27),
+                    AdapterBindingId: reader.IsDBNull(28) ? null : reader.GetInt64(28),
+                    Status: reader.GetString(29),
+                    AckKind: reader.IsDBNull(30) ? null : reader.GetString(30),
+                    ExternalMessageId: reader.IsDBNull(31) ? null : reader.GetString(31),
+                    SessionId: reader.IsDBNull(32) ? null : reader.GetString(32),
+                    ObservedAt: ReadDateTimeOffset(reader, 33),
+                    ErrorCode: reader.IsDBNull(34) ? null : reader.GetString(34),
+                    ErrorMessage: reader.IsDBNull(35) ? null : Truncate(reader.GetString(35), 240))));
         }
 
         return rows;
@@ -432,9 +631,12 @@ public sealed class GatewayStateOverviewService
         string? AgentIdentity,
         string? Role,
         string Status,
+        string? SuppressionReason,
         DateTimeOffset? LeaseExpiresAt,
         DateTimeOffset CreatedAt,
         DateTimeOffset UpdatedAt,
+        DateTimeOffset? ClaimedAt,
+        DateTimeOffset? CompletedAt,
         int AttemptCount,
         string SourceKind,
         string? SourceId,

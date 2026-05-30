@@ -43,6 +43,9 @@ public sealed class GatewayDatabase
         await EnsureColumnAsync(connection, "delivery_requests", "worker_identity", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "delivery_requests", "worker_role", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "delivery_requests", "assignment_purpose", "TEXT NULL", cancellationToken);
+        // Concrete-instance delivery routing columns (worker-pool shared-profile support)
+        await EnsureColumnAsync(connection, "delivery_requests", "agent_instance_id", "TEXT NULL", cancellationToken);
+        await EnsureColumnAsync(connection, "delivery_requests", "pool_member_id", "TEXT NULL", cancellationToken);
         // Delivery latency waterfall columns
         await EnsureColumnAsync(connection, "delivery_requests", "claimed_at", "TEXT NULL", cancellationToken);
         await EnsureColumnAsync(connection, "delivery_requests", "completed_at", "TEXT NULL", cancellationToken);
@@ -255,12 +258,14 @@ public sealed class GatewayDatabase
                 channel_id, delivery_mode, priority, reason, context_summary, context_link, metadata_json,
                 status, suppression_reason, dedupe_key, cascade_depth, attempt_count, next_attempt_at,
                 expires_at, assignment_id, worker_identity, worker_role, assignment_purpose,
+                agent_instance_id, pool_member_id,
                 created_at, updated_at
             ) VALUES (
                 $source_kind, $source_id, $source_project_id, $target_type, $target_identity, $project_id, $task_id,
                 $channel_id, $delivery_mode, $priority, $reason, $context_summary, $context_link, $metadata_json,
                 $status, $suppression_reason, $dedupe_key, $cascade_depth, 0, $next_attempt_at,
                 $expires_at, $assignment_id, $worker_identity, $worker_role, $assignment_purpose,
+                $agent_instance_id, $pool_member_id,
                 $created_at, $updated_at
             )
             RETURNING id;
@@ -289,6 +294,8 @@ public sealed class GatewayDatabase
         command.Parameters.AddWithValue("$worker_identity", DbValue(request.WorkerIdentity));
         command.Parameters.AddWithValue("$worker_role", DbValue(request.WorkerRole));
         command.Parameters.AddWithValue("$assignment_purpose", DbValue(request.AssignmentPurpose));
+        command.Parameters.AddWithValue("$agent_instance_id", DbValue(request.AgentInstanceId));
+        command.Parameters.AddWithValue("$pool_member_id", DbValue(request.PoolMemberId));
         command.Parameters.AddWithValue("$created_at", now);
         command.Parameters.AddWithValue("$updated_at", now);
 
@@ -371,7 +378,9 @@ public sealed class GatewayDatabase
                     AssignmentId: candidate.AssignmentId,
                     WorkerIdentity: candidate.WorkerIdentity,
                     WorkerRole: candidate.WorkerRole,
-                    AssignmentPurpose: candidate.AssignmentPurpose));
+                    AssignmentPurpose: candidate.AssignmentPurpose,
+                    AgentInstanceId: candidate.AgentInstanceId,
+                    PoolMemberId: candidate.PoolMemberId));
             }
 
             await ExecuteNonQueryAsync(connection, "COMMIT;", cancellationToken);
@@ -423,6 +432,19 @@ public sealed class GatewayDatabase
             {
                 await ExecuteNonQueryAsync(connection, "COMMIT;", cancellationToken);
                 return new DeliveryCallbackResult(requestStatus, false);
+            }
+
+            // Validate callback instance matches the claimed binding's adapter_instance_id.
+            // This prevents wrong-instance/duplicate claims from being acknowledged.
+            if (callback.AttemptId is not null && !string.IsNullOrWhiteSpace(callback.AdapterInstanceId))
+            {
+                var boundInstance = await ReadAttemptBindingInstanceAsync(connection, deliveryRequestId, callback.AttemptId.Value, cancellationToken);
+                if (boundInstance is not null
+                    && !string.Equals(boundInstance, callback.AdapterInstanceId, StringComparison.OrdinalIgnoreCase))
+                {
+                    await ExecuteNonQueryAsync(connection, "COMMIT;", cancellationToken);
+                    return new DeliveryCallbackResult("instance_mismatch", false);
+                }
             }
 
             await using (var updateRequest = connection.CreateCommand())
@@ -551,7 +573,8 @@ public sealed class GatewayDatabase
         command.CommandText = $"""
             SELECT id, source_kind, source_id, source_project_id, target_type, target_identity, project_id,
                    delivery_mode, context_summary, context_link, metadata_json, dedupe_key, attempt_count,
-                   assignment_id, worker_identity, worker_role, assignment_purpose
+                   assignment_id, worker_identity, worker_role, assignment_purpose,
+                   agent_instance_id, pool_member_id
             FROM delivery_requests
             WHERE status = 'pending'
               AND delivery_mode IN ({string.Join(", ", modeParameters)})
@@ -564,6 +587,20 @@ public sealed class GatewayDatabase
                  OR (target_type = 'instance' AND target_identity = $adapter_instance_id)
                  OR (target_type = 'adapter' AND target_identity IN ($adapter_kind, $adapter_instance_id))
               )
+              -- Concrete-instance routing: when the claim request specifies an agent_instance_id,
+              -- only match delivery requests targeting that instance (or generic profile deliveries
+              -- that have no instance lock). When the delivery request has a concrete agent_instance_id,
+              -- the claim must match it exactly.
+              AND (
+                   $agent_instance_id IS NULL
+                OR agent_instance_id IS NULL
+                OR agent_instance_id = $agent_instance_id
+              )
+              AND (
+                   $pool_member_id IS NULL
+                OR pool_member_id IS NULL
+                OR pool_member_id = $pool_member_id
+              )
             ORDER BY priority ASC, id ASC
             LIMIT $limit;
             """;
@@ -573,6 +610,8 @@ public sealed class GatewayDatabase
         command.Parameters.AddWithValue("$role", DbValue(request.Role));
         command.Parameters.AddWithValue("$adapter_instance_id", request.AdapterInstanceId);
         command.Parameters.AddWithValue("$adapter_kind", request.AdapterKind);
+        command.Parameters.AddWithValue("$agent_instance_id", DbValue(request.AgentInstanceId));
+        command.Parameters.AddWithValue("$pool_member_id", DbValue(request.PoolMemberId));
         command.Parameters.AddWithValue("$limit", limit);
 
         var rows = new List<DeliveryRequestRow>();
@@ -596,7 +635,9 @@ public sealed class GatewayDatabase
                 AssignmentId: reader.IsDBNull(13) ? null : reader.GetString(13),
                 WorkerIdentity: reader.IsDBNull(14) ? null : reader.GetString(14),
                 WorkerRole: reader.IsDBNull(15) ? null : reader.GetString(15),
-                AssignmentPurpose: reader.IsDBNull(16) ? null : reader.GetString(16)));
+                AssignmentPurpose: reader.IsDBNull(16) ? null : reader.GetString(16),
+                AgentInstanceId: reader.IsDBNull(17) ? null : reader.GetString(17),
+                PoolMemberId: reader.IsDBNull(18) ? null : reader.GetString(18)));
         }
 
         return rows;
@@ -672,6 +713,27 @@ public sealed class GatewayDatabase
         return await command.ExecuteScalarAsync(cancellationToken) as string;
     }
 
+    /// <summary>
+    /// Read the adapter_instance_id of the binding linked to a delivery attempt.
+    /// Returns null if the attempt or binding is not found.
+    /// Used to validate that callback adapter_instance_id matches the claiming instance.
+    /// </summary>
+    private static async Task<string?> ReadAttemptBindingInstanceAsync(SqliteConnection connection, long deliveryRequestId, long attemptId, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT b.adapter_instance_id
+            FROM delivery_attempts a
+            JOIN gateway_adapter_bindings b ON b.id = a.adapter_binding_id
+            WHERE a.delivery_request_id = $delivery_request_id AND a.id = $attempt_id
+            LIMIT 1;
+            """;
+        command.Parameters.AddWithValue("$delivery_request_id", deliveryRequestId);
+        command.Parameters.AddWithValue("$attempt_id", attemptId);
+        var result = await command.ExecuteScalarAsync(cancellationToken);
+        return result as string;
+    }
+
     private static async Task UpdateAttemptFromCallbackAsync(SqliteConnection connection, long deliveryRequestId, string status, DeliveryCallbackRequest callback, DateTimeOffset observedAt, CancellationToken cancellationToken)
     {
         await using var command = connection.CreateCommand();
@@ -729,7 +791,9 @@ public sealed class GatewayDatabase
         string? AssignmentId,
         string? WorkerIdentity,
         string? WorkerRole,
-        string? AssignmentPurpose);
+        string? AssignmentPurpose,
+        string? AgentInstanceId,
+        string? PoolMemberId);
 
     private static readonly string[] SchemaStatements =
     [
@@ -950,7 +1014,9 @@ public sealed record DeliveryClaimRequest(
     [property: JsonPropertyName("accepted_delivery_modes")] IReadOnlyList<string> AcceptedDeliveryModes,
     [property: JsonPropertyName("limit")] int Limit,
     [property: JsonPropertyName("lease_seconds")] int LeaseSeconds,
-    [property: JsonPropertyName("claimed_at")] DateTimeOffset? ClaimedAt = null);
+    [property: JsonPropertyName("claimed_at")] DateTimeOffset? ClaimedAt = null,
+    [property: JsonPropertyName("agent_instance_id")] string? AgentInstanceId = null,
+    [property: JsonPropertyName("pool_member_id")] string? PoolMemberId = null);
 
 public sealed record DeliveryClaimResult([property: JsonPropertyName("deliveries")] IReadOnlyList<ClaimedDeliveryDto> Deliveries);
 
@@ -974,7 +1040,9 @@ public sealed record ClaimedDeliveryDto(
     [property: JsonPropertyName("assignment_id")] string? AssignmentId = null,
     [property: JsonPropertyName("worker_identity")] string? WorkerIdentity = null,
     [property: JsonPropertyName("worker_role")] string? WorkerRole = null,
-    [property: JsonPropertyName("assignment_purpose")] string? AssignmentPurpose = null);
+    [property: JsonPropertyName("assignment_purpose")] string? AssignmentPurpose = null,
+    [property: JsonPropertyName("agent_instance_id")] string? AgentInstanceId = null,
+    [property: JsonPropertyName("pool_member_id")] string? PoolMemberId = null);
 
 public sealed record BindingSnapshotWrite(string AdapterKind, string AdapterInstanceId, string? AgentIdentity, string? ProjectId, string? Role, string Status, string? TransportEndpoint, DateTimeOffset? LastSeenAt, DateTimeOffset? ExpiresAt, string MetadataJson);
 public sealed record BindingSnapshotRead(DateTimeOffset CapturedAt, string? AgentIdentity, string? ProjectId, string? Role, string AdapterKind, string AdapterInstanceId, string? TransportEndpoint, string Status, DateTimeOffset? LastSeenAt, DateTimeOffset? ExpiresAt, string MetadataJson);
@@ -1004,7 +1072,9 @@ public sealed record DeliveryCreateRequest(
     string? AssignmentId = null,
     string? WorkerIdentity = null,
     string? WorkerRole = null,
-    string? AssignmentPurpose = null);
+    string? AssignmentPurpose = null,
+    string? AgentInstanceId = null,
+    string? PoolMemberId = null);
 
 public sealed record DeliveryCreateResult(long DeliveryRequestId, bool AlreadyExisted);
 

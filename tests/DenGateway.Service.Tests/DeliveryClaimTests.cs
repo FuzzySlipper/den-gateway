@@ -509,4 +509,331 @@ public class DeliveryClaimTests
         [property: JsonPropertyName("source_kind")] string SourceKind,
         [property: JsonPropertyName("source_id")] string? SourceId,
         [property: JsonPropertyName("context_link")] string? ContextLink);
+
+    [Fact]
+    public async Task TwoSameProfileBindingsSelectedInstanceClaimsAssignment()
+    {
+        // Create two bindings sharing the same agent_identity (shared profile)
+        // but with distinct adapter_instance_ids (different worker-pool members).
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+
+        var bindingA = await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:pool:worker-instance-a",
+            AgentIdentity: "shared-worker-pool",
+            UserIdentity: null,
+            ProjectId: "den-gateway",
+            Role: "coder",
+            Status: "active",
+            CapabilitiesJson: "{\"delivery_modes\":[\"wake\"]}",
+            MetadataJson: "{\"agent_instance_id\":\"worker-instance-a\"}",
+            LastSeenAt: DateTimeOffset.Parse("2026-05-30T00:00:00Z"),
+            ExpiresAt: DateTimeOffset.Parse("2026-05-30T01:00:00Z")));
+
+        var bindingB = await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:pool:worker-instance-b",
+            AgentIdentity: "shared-worker-pool",
+            UserIdentity: null,
+            ProjectId: "den-gateway",
+            Role: "coder",
+            Status: "active",
+            CapabilitiesJson: "{\"delivery_modes\":[\"wake\"]}",
+            MetadataJson: "{\"agent_instance_id\":\"worker-instance-b\"}",
+            LastSeenAt: DateTimeOffset.Parse("2026-05-30T00:00:00Z"),
+            ExpiresAt: DateTimeOffset.Parse("2026-05-30T01:00:00Z")));
+
+        Assert.NotEqual(bindingA, bindingB);
+
+        // Create a delivery request with agent_instance_id = "worker-instance-a"
+        // (concrete routing to instance A within the shared profile pool).
+        var createResult = await database.CreateDeliveryRequestAsync(new DeliveryCreateRequest(
+            SourceKind: "task_message",
+            SourceId: "delivery-123",
+            SourceProjectId: "den-gateway",
+            TargetType: "agent",
+            TargetIdentity: "shared-worker-pool",
+            ProjectId: "den-gateway",
+            TaskId: 1770,
+            ChannelId: null,
+            DeliveryMode: "wake",
+            Priority: 1,
+            Reason: "worker_assignment",
+            ContextSummary: "Concrete instance routing test",
+            ContextLink: "den://project/den-gateway/task/1770",
+            MetadataJson: "{\"test\":\"concrete-instance-routing\"}",
+            Status: "pending",
+            SuppressionReason: null,
+            DedupeKey: "dedupe:concrete-instance-a:1",
+            CascadeDepth: 0,
+            NextAttemptAt: null,
+            ExpiresAt: null,
+            CreatedAt: DateTimeOffset.Parse("2026-05-30T00:01:00Z"),
+            AssignmentId: "asn-1770",
+            WorkerIdentity: "spawned-coder",
+            WorkerRole: "coder",
+            AssignmentPurpose: "implement_concrete_routing",
+            AgentInstanceId: "worker-instance-a",
+            PoolMemberId: null));
+
+        Assert.False(createResult.AlreadyExisted);
+
+        // Claim from instance A — should match because agent_instance_id matches
+        var claimA = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:pool:worker-instance-a",
+            ProjectId: "den-gateway",
+            AgentIdentity: "shared-worker-pool",
+            Role: "coder",
+            AcceptedDeliveryModes: ["wake"],
+            Limit: 5,
+            LeaseSeconds: 60,
+            ClaimedAt: DateTimeOffset.Parse("2026-05-30T00:02:00Z"),
+            AgentInstanceId: "worker-instance-a"));
+
+        var deliveryA = Assert.Single(claimA.Deliveries);
+        Assert.Equal(createResult.DeliveryRequestId, deliveryA.DeliveryRequestId);
+        Assert.Equal(bindingA, deliveryA.AdapterBindingId);
+        Assert.Equal("worker-instance-a", deliveryA.AgentInstanceId);
+        Assert.Null(deliveryA.PoolMemberId);
+
+        // Claim from instance B — should NOT match because the delivery targets instance A
+        var claimB = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:pool:worker-instance-b",
+            ProjectId: "den-gateway",
+            AgentIdentity: "shared-worker-pool",
+            Role: "coder",
+            AcceptedDeliveryModes: ["wake"],
+            Limit: 5,
+            LeaseSeconds: 60,
+            ClaimedAt: DateTimeOffset.Parse("2026-05-30T00:02:00Z"),
+            AgentInstanceId: "worker-instance-b"));
+
+        Assert.Empty(claimB.Deliveries);
+    }
+
+    [Fact]
+    public async Task WrongInstanceCannotClaimDeliveryWithAgentInstanceId()
+    {
+        // Verify that a claim with a different agent_instance_id than what
+        // the delivery request specifies is correctly rejected.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+
+        await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            "hermes_profile", "hermes:pool:target-instance", "shared-worker-pool", null,
+            "den-gateway", "coder", "active", "{}", "{}",
+            DateTimeOffset.Parse("2026-05-30T00:00:00Z"),
+            DateTimeOffset.Parse("2026-05-30T01:00:00Z")));
+
+        await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            "hermes_profile", "hermes:pool:wrong-instance", "shared-worker-pool", null,
+            "den-gateway", "coder", "active", "{}", "{}",
+            DateTimeOffset.Parse("2026-05-30T00:00:00Z"),
+            DateTimeOffset.Parse("2026-05-30T01:00:00Z")));
+
+        // Delivery targets "target-instance" via agent_instance_id
+        var createResult = await database.CreateDeliveryRequestAsync(new DeliveryCreateRequest(
+            SourceKind: "task_message", SourceId: "wrong-instance-1", SourceProjectId: "den-gateway",
+            TargetType: "agent", TargetIdentity: "shared-worker-pool", ProjectId: "den-gateway",
+            TaskId: 1770, ChannelId: null, DeliveryMode: "wake", Priority: 1,
+            Reason: "test", ContextSummary: "Wrong instance test",
+            ContextLink: "den://project/den-gateway/task/1770",
+            MetadataJson: "{}", Status: "pending", SuppressionReason: null,
+            DedupeKey: "dedupe:wrong-instance:1", CascadeDepth: 0,
+            NextAttemptAt: null, ExpiresAt: null,
+            CreatedAt: DateTimeOffset.Parse("2026-05-30T00:01:00Z"),
+            AgentInstanceId: "target-instance"));
+
+        // Claim from "wrong-instance" should NOT match
+        var wrongClaim = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            "hermes_profile", "hermes:pool:wrong-instance", "den-gateway", "shared-worker-pool",
+            "coder", ["wake"], 5, 60,
+            DateTimeOffset.Parse("2026-05-30T00:02:00Z"),
+            AgentInstanceId: "wrong-instance"));
+
+        Assert.Empty(wrongClaim.Deliveries);
+
+        // Claim from "target-instance" should match
+        var correctClaim = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            "hermes_profile", "hermes:pool:target-instance", "den-gateway", "shared-worker-pool",
+            "coder", ["wake"], 5, 60,
+            DateTimeOffset.Parse("2026-05-30T00:02:00Z"),
+            AgentInstanceId: "target-instance"));
+
+        var delivery = Assert.Single(correctClaim.Deliveries);
+        Assert.Equal(createResult.DeliveryRequestId, delivery.DeliveryRequestId);
+        Assert.Equal("target-instance", delivery.AgentInstanceId);
+    }
+
+    [Fact]
+    public async Task PoolMemberIdRoutingRoutesDeliveryToCorrectInstance()
+    {
+        // Verify pool_member_id routing similar to agent_instance_id.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+
+        await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            "hermes_profile", "hermes:pool:p1", "pool-profile", null,
+            "den-gateway", "worker", "active", "{}", "{}",
+            DateTimeOffset.Parse("2026-05-30T00:00:00Z"),
+            DateTimeOffset.Parse("2026-05-30T01:00:00Z")));
+
+        await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            "hermes_profile", "hermes:pool:p2", "pool-profile", null,
+            "den-gateway", "worker", "active", "{}", "{}",
+            DateTimeOffset.Parse("2026-05-30T00:00:00Z"),
+            DateTimeOffset.Parse("2026-05-30T01:00:00Z")));
+
+        var createResult = await database.CreateDeliveryRequestAsync(new DeliveryCreateRequest(
+            SourceKind: "task_message", SourceId: "pool-routing-1", SourceProjectId: "den-gateway",
+            TargetType: "agent", TargetIdentity: "pool-profile", ProjectId: "den-gateway",
+            TaskId: 1770, ChannelId: null, DeliveryMode: "wake", Priority: 1,
+            Reason: "pool_test", ContextSummary: "Pool member routing test",
+            ContextLink: "den://project/den-gateway/task/1770",
+            MetadataJson: "{}", Status: "pending", SuppressionReason: null,
+            DedupeKey: "dedupe:pool-member:1", CascadeDepth: 0,
+            NextAttemptAt: null, ExpiresAt: null,
+            CreatedAt: DateTimeOffset.Parse("2026-05-30T00:01:00Z"),
+            PoolMemberId: "pm-1"));
+
+        // Claim with matching pool_member_id should succeed
+        var claimPm1 = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            "hermes_profile", "hermes:pool:p1", "den-gateway", "pool-profile",
+            "worker", ["wake"], 5, 60,
+            DateTimeOffset.Parse("2026-05-30T00:02:00Z"),
+            PoolMemberId: "pm-1"));
+
+        var delivery = Assert.Single(claimPm1.Deliveries);
+        Assert.Equal(createResult.DeliveryRequestId, delivery.DeliveryRequestId);
+        Assert.Equal("pm-1", delivery.PoolMemberId);
+
+        // Claim with non-matching pool_member_id should not match
+        var claimPm2 = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            "hermes_profile", "hermes:pool:p2", "den-gateway", "pool-profile",
+            "worker", ["wake"], 5, 60,
+            DateTimeOffset.Parse("2026-05-30T00:02:00Z"),
+            PoolMemberId: "pm-2"));
+
+        Assert.Empty(claimPm2.Deliveries);
+    }
+
+    [Fact]
+    public async Task GenericProfileDeliveryClaimableByAnyInstanceWithClaimedInstanceEvidence()
+    {
+        // A delivery request without agent_instance_id targeting a shared profile
+        // should be claimable by any live binding for that profile, and the
+        // ClaimedDeliveryDto should carry the claiming instance's evidence.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+
+        await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            "hermes_profile", "hermes:pool:instance-1", "shared-profile", null,
+            "den-gateway", "coder", "active", "{}", "{}",
+            DateTimeOffset.Parse("2026-05-30T00:00:00Z"),
+            DateTimeOffset.Parse("2026-05-30T01:00:00Z")));
+
+        await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            "hermes_profile", "hermes:pool:instance-2", "shared-profile", null,
+            "den-gateway", "coder", "active", "{}", "{}",
+            DateTimeOffset.Parse("2026-05-30T00:00:00Z"),
+            DateTimeOffset.Parse("2026-05-30T01:00:00Z")));
+
+        // No agent_instance_id — generic profile-targeted delivery
+        var createResult = await database.CreateDeliveryRequestAsync(new DeliveryCreateRequest(
+            SourceKind: "task_message", SourceId: "generic-1", SourceProjectId: "den-gateway",
+            TargetType: "agent", TargetIdentity: "shared-profile", ProjectId: "den-gateway",
+            TaskId: 1770, ChannelId: null, DeliveryMode: "wake", Priority: 1,
+            Reason: "generic_test", ContextSummary: "Generic profile delivery",
+            ContextLink: "den://project/den-gateway/task/1770",
+            MetadataJson: "{}", Status: "pending", SuppressionReason: null,
+            DedupeKey: "dedupe:generic-profile:1", CascadeDepth: 0,
+            NextAttemptAt: null, ExpiresAt: null,
+            CreatedAt: DateTimeOffset.Parse("2026-05-30T00:01:00Z")));
+
+        // Claim from instance-1 should pick up the generic profile delivery
+        var claim1 = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            "hermes_profile", "hermes:pool:instance-1", "den-gateway", "shared-profile",
+            "coder", ["wake"], 5, 60,
+            DateTimeOffset.Parse("2026-05-30T00:02:00Z"),
+            AgentInstanceId: "instance-1"));
+
+        var delivery1 = Assert.Single(claim1.Deliveries);
+        Assert.Equal(createResult.DeliveryRequestId, delivery1.DeliveryRequestId);
+        // Generic delivery has no agent_instance_id set — output should be null
+        Assert.Null(delivery1.AgentInstanceId);
+        Assert.Null(delivery1.PoolMemberId);
+        Assert.Equal("shared-profile", delivery1.TargetIdentity);
+    }
+
+    [Fact]
+    public async Task DeliveryCallbackRejectsWrongInstanceMismatch()
+    {
+        // Verify that a callback with a mismatched adapter_instance_id is rejected.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+
+        // Create two bindings, one for each instance
+        await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            "hermes_profile", "hermes:pool:claiming-instance", "shared-worker", null,
+            "den-gateway", "coder", "active", "{}", "{}",
+            DateTimeOffset.Parse("2026-05-30T00:00:00Z"),
+            DateTimeOffset.Parse("2026-05-30T01:00:00Z")));
+
+        await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            "hermes_profile", "hermes:pool:other-instance", "shared-worker", null,
+            "den-gateway", "coder", "active", "{}", "{}",
+            DateTimeOffset.Parse("2026-05-30T00:00:00Z"),
+            DateTimeOffset.Parse("2026-05-30T01:00:00Z")));
+
+        // Create delivery and claim from claiming-instance
+        var deliveryId = await InsertDeliveryRequestAsync(databasePath, "shared-worker", "wake", "dedupe:callback-mismatch:1");
+        var claimResult = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            "hermes_profile", "hermes:pool:claiming-instance", "den-gateway", "shared-worker",
+            "coder", ["wake"], 1, 60,
+            DateTimeOffset.Parse("2026-05-30T00:01:00Z")));
+
+        var attemptId = Assert.Single(claimResult.Deliveries).AttemptId;
+
+        // Attempt callback from other-instance — should be rejected as instance_mismatch
+        var wrongCallback = new DeliveryCallbackRequest(
+            AttemptId: attemptId,
+            AckKind: "bridge_delivered",
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:pool:other-instance",
+            ExternalMessageId: "msg-wrong",
+            SessionId: "session-wrong",
+            ObservedAt: DateTimeOffset.Parse("2026-05-30T00:02:00Z"),
+            MetadataJson: "{}",
+            ErrorCode: null,
+            ErrorMessage: null);
+
+        var wrongResult = await database.ApplyDeliveryCallbackAsync(deliveryId, "completed", wrongCallback);
+        Assert.Equal("instance_mismatch", wrongResult.Status);
+        Assert.False(wrongResult.Changed);
+
+        // Callback from claiming-instance should succeed
+        var correctCallback = new DeliveryCallbackRequest(
+            AttemptId: attemptId,
+            AckKind: "bridge_delivered",
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:pool:claiming-instance",
+            ExternalMessageId: "msg-correct",
+            SessionId: "session-correct",
+            ObservedAt: DateTimeOffset.Parse("2026-05-30T00:02:30Z"),
+            MetadataJson: "{}",
+            ErrorCode: null,
+            ErrorMessage: null);
+
+        var correctResult = await database.ApplyDeliveryCallbackAsync(deliveryId, "completed", correctCallback);
+        Assert.Equal("completed", correctResult.Status);
+        Assert.True(correctResult.Changed);
+    }
 }

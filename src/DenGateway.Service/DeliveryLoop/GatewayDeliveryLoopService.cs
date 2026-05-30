@@ -92,6 +92,8 @@ public sealed class GatewayDeliveryLoopService
             var workerIdentity = metadata.TryGetValue("workerIdentity", out var wId) && !string.IsNullOrWhiteSpace(wId) ? wId : null;
             var workerRole = metadata.TryGetValue("workerRole", out var wRole) && !string.IsNullOrWhiteSpace(wRole) ? wRole : null;
             var assignmentPurpose = metadata.TryGetValue("assignmentPurpose", out var aPurpose) && !string.IsNullOrWhiteSpace(aPurpose) ? aPurpose : null;
+            var agentInstanceId = metadata.TryGetValue("agentInstanceId", out var aiId) && !string.IsNullOrWhiteSpace(aiId) ? aiId : null;
+            var poolMemberId = metadata.TryGetValue("poolMemberId", out var pmId) && !string.IsNullOrWhiteSpace(pmId) ? pmId : null;
             var create = await _database.CreateDeliveryRequestAsync(new DeliveryCreateRequest(
                 SourceKind: item.SourceKind,
                 SourceId: item.SourceId,
@@ -126,7 +128,9 @@ public sealed class GatewayDeliveryLoopService
                 AssignmentId: assignmentId,
                 WorkerIdentity: workerIdentity,
                 WorkerRole: workerRole,
-                AssignmentPurpose: assignmentPurpose), cancellationToken);
+                AssignmentPurpose: assignmentPurpose,
+                AgentInstanceId: agentInstanceId,
+                PoolMemberId: poolMemberId), cancellationToken);
 
             if (create.AlreadyExisted)
             {

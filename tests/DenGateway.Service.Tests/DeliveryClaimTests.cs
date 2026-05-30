@@ -658,6 +658,15 @@ public class DeliveryClaimTests
 
         Assert.Empty(wrongClaim.Deliveries);
 
+        // A shared-profile claim without concrete instance evidence must also
+        // fail closed for deliveries locked to a concrete instance.
+        var ambiguousProfileClaim = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            "hermes_profile", "hermes:pool:target-instance", "den-gateway", "shared-worker-pool",
+            "coder", ["wake"], 5, 60,
+            DateTimeOffset.Parse("2026-05-30T00:02:00Z")));
+
+        Assert.Empty(ambiguousProfileClaim.Deliveries);
+
         // Claim from "target-instance" should match
         var correctClaim = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
             "hermes_profile", "hermes:pool:target-instance", "den-gateway", "shared-worker-pool",

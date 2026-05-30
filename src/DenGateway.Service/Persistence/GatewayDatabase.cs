@@ -587,19 +587,18 @@ public sealed class GatewayDatabase
                  OR (target_type = 'instance' AND target_identity = $adapter_instance_id)
                  OR (target_type = 'adapter' AND target_identity IN ($adapter_kind, $adapter_instance_id))
               )
-              -- Concrete-instance routing: when the claim request specifies an agent_instance_id,
-              -- only match delivery requests targeting that instance (or generic profile deliveries
-              -- that have no instance lock). When the delivery request has a concrete agent_instance_id,
-              -- the claim must match it exactly.
+              -- Concrete-instance routing: generic delivery requests may be claimed by
+              -- any matching profile instance, but concrete delivery requests require
+              -- concrete claim evidence. A shared profile claim that omits
+              -- agent_instance_id/pool_member_id must not grab an assignment
+              -- locked to a specific pool member.
               AND (
-                   $agent_instance_id IS NULL
-                OR agent_instance_id IS NULL
-                OR agent_instance_id = $agent_instance_id
+                   agent_instance_id IS NULL
+                OR ($agent_instance_id IS NOT NULL AND agent_instance_id = $agent_instance_id)
               )
               AND (
-                   $pool_member_id IS NULL
-                OR pool_member_id IS NULL
-                OR pool_member_id = $pool_member_id
+                   pool_member_id IS NULL
+                OR ($pool_member_id IS NOT NULL AND pool_member_id = $pool_member_id)
               )
             ORDER BY priority ASC, id ASC
             LIMIT $limit;

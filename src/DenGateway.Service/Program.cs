@@ -5,6 +5,7 @@ using DenGateway.Service.Clients;
 using DenGateway.Service.Deliveries;
 using DenGateway.Service.DeliveryLoop;
 using DenGateway.Service.DiscordBridge;
+using DenGateway.Service.FleetOps;
 using DenGateway.Service.Persistence;
 using Microsoft.Extensions.Options;
 using System.Text.Json.Serialization;
@@ -27,6 +28,29 @@ builder.Services.AddSingleton<GatewayChannelProjectDiscoveryService>();
 builder.Services.AddHostedService<GatewayDeliveryLoopHostedService>();
 
 builder.Services.AddSingleton<GatewayStateOverviewService>();
+
+// FleetOps - typed fleet operations API
+builder.Services.AddSingleton<FleetOpsActionRegistry>();
+builder.Services.AddSingleton<IFleetOpsServiceUnitDiscovery>(sp =>
+{
+    var env = sp.GetRequiredService<IHostEnvironment>();
+    if (env.IsDevelopment())
+    {
+        // In development/testing, use noop discovery unless configured otherwise
+        var configuredOptions = sp.GetRequiredService<IOptions<FleetOpsOptions>>().Value;
+        return new SystemdFleetOpsDiscovery(configuredOptions, sp.GetRequiredService<ILogger<SystemdFleetOpsDiscovery>>());
+    }
+    var options = sp.GetRequiredService<IOptions<FleetOpsOptions>>().Value;
+    return new SystemdFleetOpsDiscovery(options, sp.GetRequiredService<ILogger<SystemdFleetOpsDiscovery>>());
+});
+builder.Services.AddSingleton<IFleetOpsCommandExecutor, ProcessFleetOpsCommandExecutor>();
+builder.Services.AddSingleton<IFleetOpsRunStore>(_ => new InMemoryFleetOpsRunStore());
+builder.Services.AddSingleton<FleetOpsService>();
+builder.Services.AddOptions<FleetOpsOptions>()
+    .Bind(builder.Configuration.GetSection(FleetOpsOptions.SectionName))
+    .ValidateOnStart();
+// Also register the concrete options for direct injection
+builder.Services.AddSingleton(sp => sp.GetRequiredService<IOptions<FleetOpsOptions>>().Value);
 
 builder.Services.AddOptions<DiscordBridgeOptions>()
     .Bind(builder.Configuration.GetSection(DiscordBridgeOptions.SectionName))
@@ -282,6 +306,38 @@ app.MapPost("/api/discord-bridge/notifications", async (
         "validation_error" => Results.BadRequest(result),
         _ => Results.Ok(result)
     };
+});
+
+// ---- FleetOps endpoints ----
+
+app.MapGet("/api/gateway/fleet-ops", async (
+    FleetOpsService fleetOps,
+    CancellationToken cancellationToken) =>
+{
+    var result = await fleetOps.GetOverviewAsync(cancellationToken);
+    return Results.Ok(result);
+});
+
+app.MapPost("/api/gateway/fleet-ops/actions/{actionId}/runs", async (
+    string actionId,
+    FleetOpsActionRunRequest request,
+    FleetOpsService fleetOps,
+    CancellationToken cancellationToken) =>
+{
+    var result = await fleetOps.ExecuteActionAsync(actionId, request, cancellationToken);
+    return result.Status == "failed"
+        ? Results.BadRequest(result)
+        : Results.Ok(result);
+});
+
+app.MapGet("/api/gateway/fleet-ops/runs/{runId}", (
+    string runId,
+    FleetOpsService fleetOps) =>
+{
+    var run = fleetOps.GetRun(runId);
+    if (run is null)
+        return Results.NotFound(new FleetOpsRunResponse(null));
+    return Results.Ok(new FleetOpsRunResponse(run));
 });
 
 app.Run();

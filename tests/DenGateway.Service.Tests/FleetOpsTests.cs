@@ -271,6 +271,84 @@ public class FleetOpsTests
         Assert.Equal("completed", result.Status);
     }
 
+    [Fact]
+    public async Task RestartActions_RejectConcurrentExecution()
+    {
+        var enteredExecutor = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseExecutor = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var executionCount = 0;
+
+        var service = CreateService(
+            executorHandler: async (_, _, _, _) =>
+            {
+                Interlocked.Increment(ref executionCount);
+                enteredExecutor.TrySetResult();
+                await releaseExecutor.Task;
+                return new CommandResult(0, ["restart complete"], [], null);
+            },
+            restartActionCooldownSeconds: 0);
+
+        var firstRequest = new FleetOpsActionRunRequest("restart-all", DryRun: false, Args: null, Confirmation: "yes");
+        var firstRunTask = service.ExecuteActionAsync("restart-all", firstRequest);
+        await enteredExecutor.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var secondRequest = new FleetOpsActionRunRequest("restart-failed", DryRun: false);
+        var secondRun = await service.ExecuteActionAsync("restart-failed", secondRequest);
+
+        Assert.Equal("failed", secondRun.Status);
+        Assert.NotNull(secondRun.ErrorMessage);
+        Assert.Contains("already running", secondRun.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, executionCount);
+
+        releaseExecutor.SetResult();
+        var firstRun = await firstRunTask;
+        Assert.Equal("completed", firstRun.Status);
+        Assert.Equal(1, executionCount);
+    }
+
+    [Fact]
+    public async Task RestartActions_ApplyCooldownAfterExecution()
+    {
+        var executionCount = 0;
+        var service = CreateService(
+            executorHandler: async (_, _, _, _) =>
+            {
+                Interlocked.Increment(ref executionCount);
+                return new CommandResult(0, ["restart complete"], [], null);
+            },
+            restartActionCooldownSeconds: 60);
+
+        var firstRun = await service.ExecuteActionAsync("restart-failed", new FleetOpsActionRunRequest("restart-failed"));
+        var secondRun = await service.ExecuteActionAsync("restart-failed", new FleetOpsActionRunRequest("restart-failed"));
+
+        Assert.Equal("completed", firstRun.Status);
+        Assert.Equal("failed", secondRun.Status);
+        Assert.NotNull(secondRun.ErrorMessage);
+        Assert.Contains("cooldown", secondRun.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(1, executionCount);
+    }
+
+    [Fact]
+    public async Task RestartDryRuns_DoNotConsumeRestartCooldown()
+    {
+        var executionCount = 0;
+        var service = CreateService(
+            executorHandler: async (_, _, _, _) =>
+            {
+                Interlocked.Increment(ref executionCount);
+                return new CommandResult(0, ["restart preview"], [], null);
+            },
+            restartActionCooldownSeconds: 60);
+
+        var dryRun = await service.ExecuteActionAsync("restart-failed", new FleetOpsActionRunRequest("restart-failed", DryRun: true));
+        var realRun = await service.ExecuteActionAsync("restart-failed", new FleetOpsActionRunRequest("restart-failed"));
+
+        Assert.Equal("completed", dryRun.Status);
+        Assert.True(dryRun.WasDryRun);
+        Assert.Equal("completed", realRun.Status);
+        Assert.Equal(2, executionCount);
+    }
+
     // ===================== Output Redaction Tests =====================
 
     [Theory]
@@ -625,14 +703,16 @@ public class FleetOpsTests
     private static FleetOpsService CreateService(
         IReadOnlyList<FleetServiceUnit>? units = null,
         bool simulateDiscoveryFailure = false,
-        Func<string, string[], int, CancellationToken, Task<CommandResult>>? executorHandler = null)
+        Func<string, string[], int, CancellationToken, Task<CommandResult>>? executorHandler = null,
+        int restartActionCooldownSeconds = 30)
     {
         var options = new FleetOpsOptions
         {
             ScriptsDirectory = "/home/agents/local/hermes-fleet/bin",
             MaxOutputLines = 100,
             MaxRuns = 1000,
-            DefaultTimeoutSeconds = 60
+            DefaultTimeoutSeconds = 60,
+            RestartActionCooldownSeconds = restartActionCooldownSeconds
         };
 
         var registry = new FleetOpsActionRegistry();

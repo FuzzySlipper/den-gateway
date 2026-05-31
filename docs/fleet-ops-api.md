@@ -10,6 +10,7 @@ The Den Gateway FleetOps API provides a typed, auditable interface for restartin
 - **Output truncation**: output is capped at `MaxOutputLines` (default: 100).
 - **Confirmation enforcement**: mutating high-risk actions require an explicit `confirmation` field in the request.
 - **Dry-run semantics**: mutating actions with `dryRun=true` resolve to safe preview/status commands when available.
+- **Restart gate**: real restart/update actions share a non-blocking mutex and short cooldown so repeated clicks cannot stampede the fleet; dry-runs and status/smoke checks bypass the gate.
 
 ## Endpoints
 
@@ -222,7 +223,8 @@ Configured in `appsettings.json` under the `FleetOps` section:
     "MaxRuns": 1000,
     "DefaultTimeoutSeconds": 60,
     "StatusTimeoutSeconds": 30,
-    "RestartTimeoutSeconds": 120
+    "RestartTimeoutSeconds": 120,
+    "RestartActionCooldownSeconds": 30
   }
 }
 ```
@@ -233,6 +235,8 @@ Configured in `appsettings.json` under the `FleetOps` section:
 - Disabled action → 400 with `errorMessage` including `disabledReason`
 - Missing required confirmation → 400
 - Invalid args → 400 with description of validation failure
+- Another restart/update action already running → 400 with `errorMessage`
+- Restart/update cooldown active → 400 with `errorMessage` and retry time
 - Profile not in discovered units → 400 with diagnostic
 - Discovery unavailable for `restart-profile` → 400
 - Execution failure → 400 with `exitCode`, `stderrTail`, `errorMessage`
@@ -242,5 +246,6 @@ Configured in `appsettings.json` under the `FleetOps` section:
 - All execution uses `System.Diagnostics.Process` with captured stdout/stderr
 - Secret redaction is applied to all output before storage/response
 - Runs are stored in an in-memory bounded store (max 1000 entries, LRU eviction)
+- Real restart/update actions are guarded by an in-process non-blocking mutex; on completion they set `RestartActionCooldownSeconds` before another real restart/update action can begin
 - Each run is logged via `ILogger` for audit trail
 - The action registry is declarative — only `FleetOpsActionRegistry.cs` defines what can be executed

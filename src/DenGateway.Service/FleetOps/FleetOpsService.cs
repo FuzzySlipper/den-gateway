@@ -17,6 +17,8 @@ public sealed partial class FleetOpsService
     private readonly IFleetOpsRunStore _runStore;
     private readonly FleetOpsOptions _options;
     private readonly ILogger<FleetOpsService> _logger;
+    private readonly SemaphoreSlim _restartActionGate = new(1, 1);
+    private DateTimeOffset _restartActionCooldownUntil = DateTimeOffset.MinValue;
 
     public FleetOpsService(
         FleetOpsActionRegistry registry,
@@ -126,55 +128,107 @@ public sealed partial class FleetOpsService
 
         var (executable, argv) = builtCommand.Value;
 
-        // 7. Create and store the run record
-        var run = new FleetOpsActionRun(
-            RunId: runId,
-            ActionId: actionId,
-            Args: args,
-            Status: "queued",
-            CreatedAt: now,
-            WasDryRun: isDryRun);
-
-        _runStore.AddRun(run);
-        _runStore.UpdateRunStarted(runId);
-
-        // 8. Execute (skip actual execution for dry-run of non-mutating actions that just preview)
-        if (isDryRun && action.Mutating && action.DryRunScriptPath is null && action.DryRunSystemctlTemplate is null)
+        var releaseRestartActionGate = false;
+        if (RequiresRestartActionGate(action, isDryRun))
         {
-            // No preview command defined for dry-run of this mutating action
-            _runStore.UpdateRun(runId, 0, "completed", 
-                ["Dry-run: no preview command defined for this action"], 
-                [], null);
-            _logger.LogInformation("Dry-run {ActionId}: no preview available", actionId);
-            return _runStore.GetRun(runId)!;
+            if (!_restartActionGate.Wait(0))
+            {
+                _logger.LogWarning("Rejected {ActionId}: another restart/update action is already running", actionId);
+                return CreateErrorRun(runId, actionId, request, now,
+                    "Another restart/update FleetOps action is already running. Try again after it finishes.");
+            }
+
+            releaseRestartActionGate = true;
+            if (_restartActionCooldownUntil > now)
+            {
+                var remainingSeconds = Math.Max(1, (int)Math.Ceiling((_restartActionCooldownUntil - now).TotalSeconds));
+                _logger.LogWarning("Rejected {ActionId}: restart/update cooldown active until {CooldownUntil}",
+                    actionId, _restartActionCooldownUntil);
+                _restartActionGate.Release();
+                releaseRestartActionGate = false;
+                return CreateErrorRun(runId, actionId, request, now,
+                    $"Restart/update action cooldown is active. Try again after {_restartActionCooldownUntil:O} ({remainingSeconds} second(s) remaining).");
+            }
         }
 
-        CommandResult result;
         try
         {
-            result = await _executor.ExecuteAsync(executable!, argv!, action.TimeoutSeconds, cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Execution failed for {ActionId} run {RunId}", actionId, runId);
-            _runStore.UpdateRun(runId, -1, "failed", [], [], ex.Message);
+            // 7. Create and store the run record
+            var run = new FleetOpsActionRun(
+                RunId: runId,
+                ActionId: actionId,
+                Args: args,
+                Status: "queued",
+                CreatedAt: now,
+                WasDryRun: isDryRun);
+
+            _runStore.AddRun(run);
+            _runStore.UpdateRunStarted(runId);
+
+            // 8. Execute (skip actual execution for dry-run of non-mutating actions that just preview)
+            if (isDryRun && action.Mutating && action.DryRunScriptPath is null && action.DryRunSystemctlTemplate is null)
+            {
+                // No preview command defined for dry-run of this mutating action
+                _runStore.UpdateRun(runId, 0, "completed",
+                    ["Dry-run: no preview command defined for this action"],
+                    [], null);
+                _logger.LogInformation("Dry-run {ActionId}: no preview available", actionId);
+                return _runStore.GetRun(runId)!;
+            }
+
+            CommandResult result;
+            try
+            {
+                result = await _executor.ExecuteAsync(executable!, argv!, action.TimeoutSeconds, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Execution failed for {ActionId} run {RunId}", actionId, runId);
+                _runStore.UpdateRun(runId, -1, "failed", [], [], ex.Message);
+                return _runStore.GetRun(runId)!;
+            }
+
+            // 9. Update run with execution results
+            var finalStatus = isDryRun ? "completed" : (result.ExitCode == 0 ? "completed" : "failed");
+            if (result.ErrorMessage is not null)
+                finalStatus = "failed";
+
+            _runStore.UpdateRun(runId, result.ExitCode, finalStatus, result.StdoutLines, result.StderrLines, result.ErrorMessage);
+            _logger.LogInformation("FleetOps run {RunId} ({ActionId}): exit={ExitCode}, status={Status}",
+                runId, actionId, result.ExitCode, finalStatus);
+
             return _runStore.GetRun(runId)!;
         }
-
-        // 9. Update run with execution results
-        var finalStatus = isDryRun ? "completed" : (result.ExitCode == 0 ? "completed" : "failed");
-        if (result.ErrorMessage is not null)
-            finalStatus = "failed";
-
-        _runStore.UpdateRun(runId, result.ExitCode, finalStatus, result.StdoutLines, result.StderrLines, result.ErrorMessage);
-        _logger.LogInformation("FleetOps run {RunId} ({ActionId}): exit={ExitCode}, status={Status}",
-            runId, actionId, result.ExitCode, finalStatus);
-
-        return _runStore.GetRun(runId)!;
+        finally
+        {
+            if (releaseRestartActionGate)
+            {
+                ApplyRestartActionCooldown();
+                _restartActionGate.Release();
+            }
+        }
     }
 
     /// <summary>Look up a run by ID.</summary>
     public FleetOpsActionRun? GetRun(string runId) => _runStore.GetRun(runId);
+
+    private static bool RequiresRestartActionGate(FleetOpsAction action, bool isDryRun)
+    {
+        if (isDryRun || !action.Mutating)
+            return false;
+
+        return action.Id.StartsWith("restart-", StringComparison.OrdinalIgnoreCase) ||
+               action.Id.Contains("update", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void ApplyRestartActionCooldown()
+    {
+        var cooldownSeconds = Math.Max(0, _options.RestartActionCooldownSeconds);
+        if (cooldownSeconds == 0)
+            return;
+
+        _restartActionCooldownUntil = DateTimeOffset.UtcNow.AddSeconds(cooldownSeconds);
+    }
 
     private static FleetActionDescriptor BuildDescriptor(FleetOpsAction action)
     {

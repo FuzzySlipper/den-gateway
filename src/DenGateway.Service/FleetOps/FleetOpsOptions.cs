@@ -29,4 +29,10 @@ public sealed record FleetOpsOptions
 
     /// <summary>Timeout seconds for restart actions.</summary>
     public int RestartTimeoutSeconds { get; init; } = 120;
+
+    /// <summary>
+    /// Cooldown seconds applied after a real restart/update action finishes.
+    /// Dry-runs and non-mutating status/smoke actions do not consume the gate.
+    /// </summary>
+    public int RestartActionCooldownSeconds { get; init; } = 30;
 }

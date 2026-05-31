@@ -105,13 +105,32 @@ public sealed class GatewayStateOverviewService
 
             var state = ClassifyGroup(fallbackBindings, groupDeliveries, now);
             var counts = ComputeDeliveryCounts(groupDeliveries, now, state);
+
+            // Build child-run states from adapter bindings and deliveries
+            var childRuns = BuildChildRunStates(fallbackBindings, groupDeliveries, now);
+            var childrenCount = childRuns.Count;
+            if (childrenCount > 1)
+                flags.Add("has_multiple_children");
+            if (childRuns.Any(c => c.Flags.Contains("stale")))
+                flags.Add("child_stale");
+            if (childRuns.Any(c => c.Flags.Contains("crashed")))
+                flags.Add("child_crashed");
+
+            // Detect profile identity from first binding's adapter instance pattern
+            var profileIdentity = fallbackBindings.Count > 0
+                ? TryParseProfileIdentity(fallbackBindings[0].AdapterInstanceId)
+                : null;
+
             agents.Add(new GatewayStateGroup(
                 AgentKey: BuildAgentKey(key.ProjectId, key.AgentIdentity, key.Role),
                 ProjectId: key.ProjectId,
                 AgentIdentity: key.AgentIdentity,
                 Role: key.Role,
+                ProfileIdentity: profileIdentity,
                 BindingFreshness: BindingFreshness(fallbackBindings),
                 AdapterInstances: fallbackBindings.Select(b => BuildBindingInfo(b, now)).ToList(),
+                ChildRuns: childRuns,
+                ChildrenCount: childrenCount,
                 DeliveryCounts: counts,
                 CurrentDeliveries: currentDeliveries,
                 RecentDeliveries: recentDeliveries,
@@ -142,6 +161,8 @@ public sealed class GatewayStateOverviewService
                 TotalGroups: agents.Count,
                 TotalBindings: bindings.Count,
                 TotalDeliveries: totalDeliveries,
+                TotalChildRuns: agents.Sum(a => a.ChildrenCount),
+                ProfilesWithChildren: agents.Count(a => a.ChildrenCount > 0),
                 Limit: limit,
                 IncludeTerminalMinutes: includeTerminalMinutes)
         };
@@ -198,6 +219,7 @@ public sealed class GatewayStateOverviewService
             LastAttempt: delivery.LastAttempt,
             Flags: flags,
             AssignmentId: delivery.AssignmentId,
+            RunId: delivery.RunId,
             WorkerIdentity: delivery.WorkerIdentity,
             WorkerRole: delivery.WorkerRole,
             AssignmentPurpose: delivery.AssignmentPurpose,
@@ -533,6 +555,8 @@ public sealed class GatewayStateOverviewService
                    dr.source_kind, dr.source_id, dr.source_project_id, dr.task_id, dr.channel_id,
                    dr.delivery_mode, dr.context_summary, dr.context_link, dr.next_attempt_at, dr.expires_at,
                    dr.assignment_id, dr.worker_identity, dr.worker_role, dr.assignment_purpose,
+                   dr.agent_instance_id, dr.pool_member_id,
+                   json_extract(dr.metadata_json, '$.summary_metadata.runId') as run_id,
                    da.id, da.attempt_number, da.adapter_binding_id, da.status, da.ack_kind,
                    da.external_message_id, da.session_id, da.observed_at, da.error_code, da.error_message
             FROM delivery_requests dr
@@ -600,17 +624,20 @@ public sealed class GatewayStateOverviewService
                 WorkerIdentity: reader.IsDBNull(23) ? null : reader.GetString(23),
                 WorkerRole: reader.IsDBNull(24) ? null : reader.GetString(24),
                 AssignmentPurpose: reader.IsDBNull(25) ? null : reader.GetString(25),
-                LastAttempt: reader.IsDBNull(26) ? null : new GatewayDeliveryAttemptOverview(
-                    AttemptId: reader.GetInt64(26),
-                    AttemptNumber: reader.GetInt32(27),
-                    AdapterBindingId: reader.IsDBNull(28) ? null : reader.GetInt64(28),
-                    Status: reader.GetString(29),
-                    AckKind: reader.IsDBNull(30) ? null : reader.GetString(30),
-                    ExternalMessageId: reader.IsDBNull(31) ? null : reader.GetString(31),
-                    SessionId: reader.IsDBNull(32) ? null : reader.GetString(32),
-                    ObservedAt: ReadDateTimeOffset(reader, 33),
-                    ErrorCode: reader.IsDBNull(34) ? null : reader.GetString(34),
-                    ErrorMessage: reader.IsDBNull(35) ? null : Truncate(reader.GetString(35), 240))));
+                // agent_instance_id at col 26 (not stored in DeliveryRow — used for child-run grouping in caller)
+                // pool_member_id at col 27 (not stored in DeliveryRow)
+                RunId: reader.IsDBNull(28) ? null : reader.GetString(28),
+                LastAttempt: reader.IsDBNull(29) ? null : new GatewayDeliveryAttemptOverview(
+                    AttemptId: reader.GetInt64(29),
+                    AttemptNumber: reader.GetInt32(30),
+                    AdapterBindingId: reader.IsDBNull(31) ? null : reader.GetInt64(31),
+                    Status: reader.GetString(32),
+                    AckKind: reader.IsDBNull(33) ? null : reader.GetString(33),
+                    ExternalMessageId: reader.IsDBNull(34) ? null : reader.GetString(34),
+                    SessionId: reader.IsDBNull(35) ? null : reader.GetString(35),
+                    ObservedAt: ReadDateTimeOffset(reader, 36),
+                    ErrorCode: reader.IsDBNull(37) ? null : reader.GetString(37),
+                    ErrorMessage: reader.IsDBNull(38) ? null : Truncate(reader.GetString(38), 240))));
         }
 
         return rows;
@@ -620,6 +647,92 @@ public sealed class GatewayStateOverviewService
         reader.IsDBNull(ordinal) ? null : DateTimeOffset.Parse(reader.GetString(ordinal), CultureInfo.InvariantCulture);
 
     private static object DbValue(string? value) => string.IsNullOrWhiteSpace(value) ? DBNull.Value : value;
+
+    private static IReadOnlyList<ChildRunState> BuildChildRunStates(
+        IReadOnlyList<BindingRow> bindings, IReadOnlyList<DeliveryRow> deliveries, DateTimeOffset now)
+    {
+        var results = new List<ChildRunState>();
+        var seenAdapterIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var binding in bindings)
+        {
+            var adapterId = binding.AdapterInstanceId;
+            if (string.IsNullOrWhiteSpace(adapterId) || !adapterId.Contains(':'))
+                continue;
+            if (!seenAdapterIds.Add(adapterId))
+                continue;
+
+            // Find deliveries associated with this adapter instance via agent_instance_id in metadata
+            var childDeliveries = deliveries
+                .Where(d => !IsTerminal(d.Status))
+                .ToList();
+
+            var flags = new List<string>();
+            var isFresh = IsFreshBinding(binding, now);
+
+            // Derive status
+            string status;
+            if (!isFresh && childDeliveries.Any(d => !IsTerminal(d.Status)))
+            {
+                status = "crashed";
+                flags.Add("crashed");
+                flags.Add("binding_inactive_with_deliveries");
+            }
+            else if (!isFresh)
+            {
+                status = "stale";
+                flags.Add("stale");
+            }
+            else if (childDeliveries.Any(d => d.Status == "delivering"))
+            {
+                status = "busy";
+            }
+            else if (childDeliveries.Any(d => d.Status is "delivered" or "acknowledged"))
+            {
+                status = "busy";
+            }
+            else if (childDeliveries.Any(d => d.Status == "pending"))
+            {
+                status = "busy";
+            }
+            else
+            {
+                status = "available";
+            }
+
+            // Find any active assignment
+            var activeDelivery = childDeliveries.FirstOrDefault();
+            var leaseId = activeDelivery?.AssignmentId is not null && activeDelivery.WorkerIdentity is not null
+                ? $"{activeDelivery.WorkerIdentity}:{activeDelivery.RunId}"
+                : null;
+
+            results.Add(new ChildRunState(
+                AdapterInstanceId: adapterId,
+                AgentIdentity: binding.AgentIdentity,
+                Role: binding.Role,
+                Status: status,
+                AssignmentId: activeDelivery?.AssignmentId,
+                RunId: activeDelivery?.RunId,
+                LeaseId: leaseId,
+                LastSeenAt: binding.LastSeenAt,
+                StaleAfterSeconds: null,
+                Flags: flags));
+        }
+
+        return results;
+    }
+
+    private static string? TryParseProfileIdentity(string? adapterInstanceId)
+    {
+        if (string.IsNullOrWhiteSpace(adapterInstanceId))
+            return null;
+
+        // Expected pattern: hermes:{host}:{profile}:{run_id}
+        var parts = adapterInstanceId.Split(':');
+        if (parts.Length >= 3)
+            return parts[2]; // profile identity is the 3rd segment
+        return null;
+    }
 
     private sealed record BindingRow(long Id, string AdapterKind, string AdapterInstanceId, string? AgentIdentity, string? ProjectId, string? Role, string Status, DateTimeOffset? LastSeenAt, DateTimeOffset? ExpiresAt, DateTimeOffset CreatedAt);
 
@@ -652,5 +765,6 @@ public sealed class GatewayStateOverviewService
         string? WorkerIdentity,
         string? WorkerRole,
         string? AssignmentPurpose,
+        string? RunId,
         GatewayDeliveryAttemptOverview? LastAttempt);
 }

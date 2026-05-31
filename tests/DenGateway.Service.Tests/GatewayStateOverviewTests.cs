@@ -998,4 +998,143 @@ public class GatewayStateOverviewTests
 
     private static object DbValue(string? value) =>
         string.IsNullOrWhiteSpace(value) ? DBNull.Value : value;
+
+    // ─────────────────────────────────────────────────────────────────
+    // New: Child-run visibility and stale assignment reconciliation (#1805)
+    // ─────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task MultiChildBindings_GroupedUnderOneAgent()
+    {
+        var (dbPath, db) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(dbPath, "hermes_profile", "hermes:den-k8:spawned-coder:piw_aaa",
+                "pool-coder-01", null, "den-core", "coder", "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+            await SeedBindingAsync(dbPath, "hermes_profile", "hermes:den-k8:spawned-coder:piw_bbb",
+                "pool-coder-01", null, "den-core", "coder", "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+
+            var service = new GatewayStateOverviewService(db);
+            var req = new GatewayStateOverviewRequest(AgentIdentity: "pool-coder-01");
+            var result = await service.GetGatewayStateOverviewAsync(req, TestNow);
+
+            Assert.Single(result.Groups);
+            var group = result.Groups[0];
+            Assert.Equal(2, group.ChildrenCount);
+            Assert.Equal(2, group.ChildRuns.Count);
+            Assert.Contains("has_multiple_children", group.Flags);
+            Assert.Equal("spawned-coder", group.ProfileIdentity);
+            Assert.Equal(2, result.Metadata.TotalChildRuns);
+        }
+        finally { CleanupDatabase(dbPath); }
+    }
+
+    [Fact]
+    public async Task ChildRunStatus_BusyWhenActiveDelivery()
+    {
+        var (dbPath, db) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(dbPath, "hermes_profile", "hermes:den-k8:spawned-coder:piw_111",
+                "pool-coder-01", null, "den-core", "coder", "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+            await SeedDeliveryAsync(dbPath, "pool-coder-01", "den-core", "delivering",
+                dedupeKey: "d:1", createdAt: TestNow.AddMinutes(-5), leaseExpiresAt: TestNow.AddMinutes(25));
+
+            var service = new GatewayStateOverviewService(db);
+            var result = await service.GetGatewayStateOverviewAsync(new GatewayStateOverviewRequest(AgentIdentity: "pool-coder-01"), TestNow);
+
+            var group = result.Groups[0];
+            Assert.Equal(1, group.ChildrenCount);
+            Assert.Equal("busy", group.ChildRuns[0].Status);
+            Assert.Equal("hermes:den-k8:spawned-coder:piw_111", group.ChildRuns[0].AdapterInstanceId);
+        }
+        finally { CleanupDatabase(dbPath); }
+    }
+
+    [Fact]
+    public async Task ChildRunStatus_StaleWhenBindingExpired()
+    {
+        var (dbPath, db) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(dbPath, "hermes_profile", "hermes:den-k8:spawned-coder:piw_stale",
+                "pool-coder-01", null, "den-core", "coder", "active", TestNow.AddHours(-3), TestNow.AddHours(-1));
+
+            var service = new GatewayStateOverviewService(db);
+            var result = await service.GetGatewayStateOverviewAsync(new GatewayStateOverviewRequest(AgentIdentity: "pool-coder-01"), TestNow);
+
+            var group = result.Groups[0];
+            Assert.Equal(1, group.ChildrenCount);
+            Assert.Equal("stale", group.ChildRuns[0].Status);
+            Assert.Contains("stale", group.ChildRuns[0].Flags);
+            Assert.Contains("child_stale", group.Flags);
+        }
+        finally { CleanupDatabase(dbPath); }
+    }
+
+    [Fact]
+    public async Task ChildRunStatus_CrashedWhenInactiveWithDeliveries()
+    {
+        var (dbPath, db) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(dbPath, "hermes_profile", "hermes:den-k8:spawned-coder:piw_crash",
+                "pool-coder-01", null, "den-core", "coder", "inactive", TestNow.AddHours(-3), TestNow.AddHours(-1));
+            await SeedDeliveryAsync(dbPath, "pool-coder-01", "den-core", "delivering",
+                dedupeKey: "d:crash", createdAt: TestNow.AddMinutes(-30), leaseExpiresAt: TestNow.AddMinutes(-10));
+
+            var service = new GatewayStateOverviewService(db);
+            var result = await service.GetGatewayStateOverviewAsync(new GatewayStateOverviewRequest(AgentIdentity: "pool-coder-01"), TestNow);
+
+            var group = result.Groups[0];
+            Assert.Equal("crashed", group.ChildRuns[0].Status);
+            Assert.Contains("crashed", group.ChildRuns[0].Flags);
+            Assert.Contains("child_crashed", group.Flags);
+        }
+        finally { CleanupDatabase(dbPath); }
+    }
+
+    [Fact]
+    public async Task BackwardCompat_SingleBindingNoChildren()
+    {
+        var (dbPath, db) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(dbPath, "hermes_profile", "runner-main",
+                "den-gateway-runner", null, "den-gateway", "runner", "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+
+            var service = new GatewayStateOverviewService(db);
+            var result = await service.GetGatewayStateOverviewAsync(new GatewayStateOverviewRequest(AgentIdentity: "den-gateway-runner"), TestNow);
+
+            var group = result.Groups[0];
+            Assert.Equal(0, group.ChildrenCount);
+            Assert.Empty(group.ChildRuns);
+            Assert.Null(group.ProfileIdentity); // non-child binding has no detectable profile
+            Assert.Equal(0, result.Metadata.TotalChildRuns);
+        }
+        finally { CleanupDatabase(dbPath); }
+    }
+
+    [Fact]
+    public async Task StaleAssignmentReconciliation_FlagsStuckDeliveries()
+    {
+        var (dbPath, db) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(dbPath, "hermes_profile", "hermes:den-k8:spawned-coder:piw_stale_asgn",
+                "pool-coder-01", null, "den-core", "coder", "active", TestNow.AddHours(-2), TestNow.AddHours(2));
+            // Delivery with assignment_id, stuck in delivering past StaleAssignmentMinutes (15 min)
+            await SeedDeliveryAsync(dbPath, "pool-coder-01", "den-core", "delivering",
+                dedupeKey: "d:sasgn", createdAt: TestNow.AddMinutes(-20),
+                leaseExpiresAt: TestNow.AddMinutes(-10));
+
+            var service = new GatewayStateOverviewService(db);
+            var result = await service.GetGatewayStateOverviewAsync(new GatewayStateOverviewRequest(AgentIdentity: "pool-coder-01"), TestNow);
+
+            var group = result.Groups[0];
+            // The delivery should be flagged as stuck (stale assignment)
+            Assert.Contains(group.CurrentDeliveries, d => d.Flags.Contains("stuck"));
+        }
+        finally { CleanupDatabase(dbPath); }
+    }
 }

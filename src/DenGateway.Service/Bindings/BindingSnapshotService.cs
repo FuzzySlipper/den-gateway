@@ -127,16 +127,27 @@ public sealed class BindingSnapshotService
 
         if (row.LastSeenAt is not null && row.LastSeenAt.Value.AddMinutes(_settings.BindingTtlMinutes) <= now)
         {
-            return "ttl_expired";
+            return IsChildRunBinding(row.AdapterInstanceId) ? "child_run_ttl_expired" : "ttl_expired";
         }
 
         if (!string.Equals(row.Status, "active", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(row.Status, "degraded", StringComparison.OrdinalIgnoreCase))
         {
-            return "inactive";
+            return IsChildRunBinding(row.AdapterInstanceId) ? "child_run_inactive" : "inactive";
         }
 
         return null;
+    }
+
+    private static bool IsChildRunBinding(string adapterInstanceId)
+    {
+        if (string.IsNullOrWhiteSpace(adapterInstanceId))
+            return false;
+
+        // Child-run pattern: hermes:{host}:{profile}:{run_id}
+        // Has exactly 3 colons after the adapter kind prefix
+        return adapterInstanceId.StartsWith("hermes:", StringComparison.OrdinalIgnoreCase)
+            && adapterInstanceId.Count(c => c == ':') >= 3;
     }
 }
 

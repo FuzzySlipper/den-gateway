@@ -44,6 +44,8 @@ public sealed record GatewayStateOverviewMetadata(
     [property: JsonPropertyName("totalGroups")] int TotalGroups,
     [property: JsonPropertyName("totalBindings")] int TotalBindings,
     [property: JsonPropertyName("totalDeliveries")] int TotalDeliveries,
+    [property: JsonPropertyName("totalChildRuns")] int TotalChildRuns,
+    [property: JsonPropertyName("profilesWithChildren")] int ProfilesWithChildren,
     [property: JsonPropertyName("limit")] int Limit,
     [property: JsonPropertyName("includeTerminalMinutes")] int IncludeTerminalMinutes);
 
@@ -52,8 +54,11 @@ public sealed record GatewayStateGroup(
     [property: JsonPropertyName("projectId")] string? ProjectId,
     [property: JsonPropertyName("agentIdentity")] string? AgentIdentity,
     [property: JsonPropertyName("role")] string? Role,
+    [property: JsonPropertyName("profileIdentity")] string? ProfileIdentity,
     [property: JsonPropertyName("bindingFreshness")] string BindingFreshness,
     [property: JsonPropertyName("adapterInstances")] IReadOnlyList<GatewayAdapterInstanceInfo> AdapterInstances,
+    [property: JsonPropertyName("childRuns")] IReadOnlyList<ChildRunState> ChildRuns,
+    [property: JsonPropertyName("childrenCount")] int ChildrenCount,
     [property: JsonPropertyName("deliverySummary")] DeliverySummaryCounts DeliveryCounts,
     [property: JsonPropertyName("currentDeliveries")] IReadOnlyList<GatewayDeliveryOverview> CurrentDeliveries,
     [property: JsonPropertyName("recentDeliveries")] IReadOnlyList<GatewayDeliveryOverview> RecentDeliveries,
@@ -89,6 +94,18 @@ public sealed record GatewayAdapterInstanceInfo(
     public DateTimeOffset CreatedAt { get; init; }
 }
 
+public sealed record ChildRunState(
+    [property: JsonPropertyName("adapterInstanceId")] string AdapterInstanceId,
+    [property: JsonPropertyName("agentIdentity")] string? AgentIdentity,
+    [property: JsonPropertyName("role")] string? Role,
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("assignmentId")] string? AssignmentId,
+    [property: JsonPropertyName("runId")] string? RunId,
+    [property: JsonPropertyName("leaseId")] string? LeaseId,
+    [property: JsonPropertyName("lastSeenAt")] DateTimeOffset? LastSeenAt,
+    [property: JsonPropertyName("staleAfterSeconds")] int? StaleAfterSeconds,
+    [property: JsonPropertyName("flags")] IReadOnlyList<string> Flags);
+
 public sealed record DeliverySummaryCounts(
     [property: JsonPropertyName("state")] string State,
     [property: JsonPropertyName("pendingCount")] int Pending,
@@ -123,6 +140,7 @@ public sealed record GatewayDeliveryOverview(
     [property: JsonPropertyName("lastAttempt")] GatewayDeliveryAttemptOverview? LastAttempt,
     [property: JsonPropertyName("flags")] IReadOnlyList<string> Flags,
     [property: JsonPropertyName("assignmentId")] string? AssignmentId = null,
+    [property: JsonPropertyName("runId")] string? RunId = null,
     [property: JsonPropertyName("workerIdentity")] string? WorkerIdentity = null,
     [property: JsonPropertyName("workerRole")] string? WorkerRole = null,
     [property: JsonPropertyName("assignmentPurpose")] string? AssignmentPurpose = null,

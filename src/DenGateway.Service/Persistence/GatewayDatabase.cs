@@ -574,7 +574,8 @@ public sealed class GatewayDatabase
             SELECT id, source_kind, source_id, source_project_id, target_type, target_identity, project_id,
                    delivery_mode, context_summary, context_link, metadata_json, dedupe_key, attempt_count,
                    assignment_id, worker_identity, worker_role, assignment_purpose,
-                   agent_instance_id, pool_member_id
+                   agent_instance_id, pool_member_id,
+                   json_extract(metadata_json, '$.summary_metadata.runId') as run_id
             FROM delivery_requests
             WHERE status = 'pending'
               AND delivery_mode IN ({string.Join(", ", modeParameters)})
@@ -636,7 +637,8 @@ public sealed class GatewayDatabase
                 WorkerRole: reader.IsDBNull(15) ? null : reader.GetString(15),
                 AssignmentPurpose: reader.IsDBNull(16) ? null : reader.GetString(16),
                 AgentInstanceId: reader.IsDBNull(17) ? null : reader.GetString(17),
-                PoolMemberId: reader.IsDBNull(18) ? null : reader.GetString(18)));
+                PoolMemberId: reader.IsDBNull(18) ? null : reader.GetString(18),
+                RunId: reader.IsDBNull(19) ? null : reader.GetString(19)));
         }
 
         return rows;
@@ -792,7 +794,8 @@ public sealed class GatewayDatabase
         string? WorkerRole,
         string? AssignmentPurpose,
         string? AgentInstanceId,
-        string? PoolMemberId);
+        string? PoolMemberId,
+        string? RunId);
 
     private static readonly string[] SchemaStatements =
     [

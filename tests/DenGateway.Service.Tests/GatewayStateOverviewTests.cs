@@ -972,7 +972,13 @@ public class GatewayStateOverviewTests
         string dedupeKey,
         DateTimeOffset createdAt,
         DateTimeOffset? updatedAt = null,
-        DateTimeOffset? leaseExpiresAt = null)
+        DateTimeOffset? leaseExpiresAt = null,
+        string? assignmentId = null,
+        string? workerIdentity = null,
+        string? workerRole = null,
+        string? agentInstanceId = null,
+        string? poolMemberId = null,
+        string? runId = null)
     {
         await using var connection = new SqliteConnection($"Data Source={databasePath}");
         await connection.OpenAsync();
@@ -980,10 +986,14 @@ public class GatewayStateOverviewTests
         command.CommandText = """
             INSERT INTO delivery_requests (
                 source_kind, target_type, target_identity, project_id, delivery_mode, priority,
-                status, dedupe_key, attempt_count, cascade_depth, lease_expires_at, created_at, updated_at
+                status, dedupe_key, attempt_count, cascade_depth, lease_expires_at,
+                assignment_id, worker_identity, worker_role, agent_instance_id, pool_member_id, metadata_json,
+                created_at, updated_at
             ) VALUES (
                 'test', 'agent', $target, $project, 'notify', 3,
-                $status, $dedupe, 0, 0, $lease, $created, $updated
+                $status, $dedupe, 0, 0, $lease,
+                $assignment, $worker, $worker_role, $agent_instance, $pool_member, $metadata,
+                $created, $updated
             );
             """;
         command.Parameters.AddWithValue("$target", targetIdentity);
@@ -991,6 +1001,13 @@ public class GatewayStateOverviewTests
         command.Parameters.AddWithValue("$status", status);
         command.Parameters.AddWithValue("$dedupe", dedupeKey);
         command.Parameters.AddWithValue("$lease", leaseExpiresAt is null ? DBNull.Value : leaseExpiresAt.Value.ToString("O"));
+        command.Parameters.AddWithValue("$assignment", DbValue(assignmentId));
+        command.Parameters.AddWithValue("$worker", DbValue(workerIdentity));
+        command.Parameters.AddWithValue("$worker_role", DbValue(workerRole));
+        command.Parameters.AddWithValue("$agent_instance", DbValue(agentInstanceId));
+        command.Parameters.AddWithValue("$pool_member", DbValue(poolMemberId));
+        var metadata = runId is null ? "{}" : $"{{\"summary_metadata\":{{\"runId\":\"{runId}\"}}}}";
+        command.Parameters.AddWithValue("$metadata", metadata);
         command.Parameters.AddWithValue("$created", createdAt.ToString("O"));
         command.Parameters.AddWithValue("$updated", (updatedAt ?? createdAt).ToString("O"));
         await command.ExecuteNonQueryAsync();
@@ -1038,7 +1055,9 @@ public class GatewayStateOverviewTests
             await SeedBindingAsync(dbPath, "hermes_profile", "hermes:den-k8:spawned-coder:piw_111",
                 "pool-coder-01", null, "den-core", "coder", "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
             await SeedDeliveryAsync(dbPath, "pool-coder-01", "den-core", "delivering",
-                dedupeKey: "d:1", createdAt: TestNow.AddMinutes(-5), leaseExpiresAt: TestNow.AddMinutes(25));
+                dedupeKey: "d:1", createdAt: TestNow.AddMinutes(-5), leaseExpiresAt: TestNow.AddMinutes(25),
+                assignmentId: "asn-111", workerIdentity: "pool-coder-01", workerRole: "coder",
+                agentInstanceId: "hermes:den-k8:spawned-coder:piw_111", poolMemberId: "pool-coder-01", runId: "piw_111");
 
             var service = new GatewayStateOverviewService(db);
             var result = await service.GetGatewayStateOverviewAsync(new GatewayStateOverviewRequest(AgentIdentity: "pool-coder-01"), TestNow);
@@ -1047,6 +1066,31 @@ public class GatewayStateOverviewTests
             Assert.Equal(1, group.ChildrenCount);
             Assert.Equal("busy", group.ChildRuns[0].Status);
             Assert.Equal("hermes:den-k8:spawned-coder:piw_111", group.ChildRuns[0].AdapterInstanceId);
+        }
+        finally { CleanupDatabase(dbPath); }
+    }
+
+    [Fact]
+    public async Task ChildRunStatus_OnlyMatchedChildIsBusy()
+    {
+        var (dbPath, db) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(dbPath, "hermes_profile", "hermes:den-k8:spawned-coder:piw_busy",
+                "pool-coder-01", null, "den-core", "coder", "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+            await SeedBindingAsync(dbPath, "hermes_profile", "hermes:den-k8:spawned-coder:piw_idle",
+                "pool-coder-01", null, "den-core", "coder", "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+            await SeedDeliveryAsync(dbPath, "pool-coder-01", "den-core", "delivering",
+                dedupeKey: "d:busy-only", createdAt: TestNow.AddMinutes(-5), leaseExpiresAt: TestNow.AddMinutes(25),
+                assignmentId: "asn-busy", workerIdentity: "pool-coder-01", workerRole: "coder",
+                agentInstanceId: "hermes:den-k8:spawned-coder:piw_busy", poolMemberId: "pool-coder-01", runId: "piw_busy");
+
+            var service = new GatewayStateOverviewService(db);
+            var result = await service.GetGatewayStateOverviewAsync(new GatewayStateOverviewRequest(AgentIdentity: "pool-coder-01"), TestNow);
+            var statuses = result.Groups[0].ChildRuns.ToDictionary(c => c.AdapterInstanceId, c => c.Status);
+
+            Assert.Equal("busy", statuses["hermes:den-k8:spawned-coder:piw_busy"]);
+            Assert.Equal("available", statuses["hermes:den-k8:spawned-coder:piw_idle"]);
         }
         finally { CleanupDatabase(dbPath); }
     }
@@ -1081,7 +1125,9 @@ public class GatewayStateOverviewTests
             await SeedBindingAsync(dbPath, "hermes_profile", "hermes:den-k8:spawned-coder:piw_crash",
                 "pool-coder-01", null, "den-core", "coder", "inactive", TestNow.AddHours(-3), TestNow.AddHours(-1));
             await SeedDeliveryAsync(dbPath, "pool-coder-01", "den-core", "delivering",
-                dedupeKey: "d:crash", createdAt: TestNow.AddMinutes(-30), leaseExpiresAt: TestNow.AddMinutes(-10));
+                dedupeKey: "d:crash", createdAt: TestNow.AddMinutes(-30), leaseExpiresAt: TestNow.AddMinutes(-10),
+                assignmentId: "asn-crash", workerIdentity: "pool-coder-01", workerRole: "coder",
+                agentInstanceId: "hermes:den-k8:spawned-coder:piw_crash", poolMemberId: "pool-coder-01", runId: "piw_crash");
 
             var service = new GatewayStateOverviewService(db);
             var result = await service.GetGatewayStateOverviewAsync(new GatewayStateOverviewRequest(AgentIdentity: "pool-coder-01"), TestNow);
@@ -1126,7 +1172,9 @@ public class GatewayStateOverviewTests
             // Delivery with assignment_id, stuck in delivering past StaleAssignmentMinutes (15 min)
             await SeedDeliveryAsync(dbPath, "pool-coder-01", "den-core", "delivering",
                 dedupeKey: "d:sasgn", createdAt: TestNow.AddMinutes(-20),
-                leaseExpiresAt: TestNow.AddMinutes(-10));
+                leaseExpiresAt: TestNow.AddMinutes(-10),
+                assignmentId: "asn-stale", workerIdentity: "pool-coder-01", workerRole: "coder",
+                agentInstanceId: "hermes:den-k8:spawned-coder:piw_stale_asgn", poolMemberId: "pool-coder-01", runId: "piw_stale_asgn");
 
             var service = new GatewayStateOverviewService(db);
             var result = await service.GetGatewayStateOverviewAsync(new GatewayStateOverviewRequest(AgentIdentity: "pool-coder-01"), TestNow);

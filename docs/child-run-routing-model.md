@@ -93,9 +93,8 @@ Child-run status is derived from binding freshness + delivery state:
 
 When a delivery has an `assignment_id` and remains in `delivering`/`delivered` state
 beyond the `StaleAssignmentMinutes` threshold (15 min), Gateway flags it as
-`stale_assignment`. If the delivery additionally exceeds the stuck timeout, it is
-auto-expired to prevent capacity leaks from stuck deliveries on terminated Core
-assignments.
+`stale_assignment` / `stuck` in status projections. Gateway does not silently mutate
+Core assignment state or release Core capacity; terminal assignment release remains owned by Core/orchestration. The flag gives operators and follow-up automation enough evidence to reconcile stuck work without hiding the lifecycle transition.
 
 ## Deferred work (separate tasks)
 

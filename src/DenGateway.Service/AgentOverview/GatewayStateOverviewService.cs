@@ -556,7 +556,12 @@ public sealed class GatewayStateOverviewService
                    dr.delivery_mode, dr.context_summary, dr.context_link, dr.next_attempt_at, dr.expires_at,
                    dr.assignment_id, dr.worker_identity, dr.worker_role, dr.assignment_purpose,
                    dr.agent_instance_id, dr.pool_member_id,
-                   json_extract(dr.metadata_json, '$.summary_metadata.runId') as run_id,
+                   COALESCE(
+                       json_extract(dr.metadata_json, '$.summary_metadata.runId'),
+                       json_extract(dr.metadata_json, '$.summary_metadata.workerRunId'),
+                       json_extract(dr.metadata_json, '$.run_id'),
+                       json_extract(dr.metadata_json, '$.workerRunId'),
+                       json_extract(dr.metadata_json, '$.worker_run_id')) as run_id,
                    da.id, da.attempt_number, da.adapter_binding_id, da.status, da.ack_kind,
                    da.external_message_id, da.session_id, da.observed_at, da.error_code, da.error_message
             FROM delivery_requests dr
@@ -624,8 +629,8 @@ public sealed class GatewayStateOverviewService
                 WorkerIdentity: reader.IsDBNull(23) ? null : reader.GetString(23),
                 WorkerRole: reader.IsDBNull(24) ? null : reader.GetString(24),
                 AssignmentPurpose: reader.IsDBNull(25) ? null : reader.GetString(25),
-                // agent_instance_id at col 26 (not stored in DeliveryRow — used for child-run grouping in caller)
-                // pool_member_id at col 27 (not stored in DeliveryRow)
+                AgentInstanceId: reader.IsDBNull(26) ? null : reader.GetString(26),
+                PoolMemberId: reader.IsDBNull(27) ? null : reader.GetString(27),
                 RunId: reader.IsDBNull(28) ? null : reader.GetString(28),
                 LastAttempt: reader.IsDBNull(29) ? null : new GatewayDeliveryAttemptOverview(
                     AttemptId: reader.GetInt64(29),
@@ -657,14 +662,17 @@ public sealed class GatewayStateOverviewService
         foreach (var binding in bindings)
         {
             var adapterId = binding.AdapterInstanceId;
-            if (string.IsNullOrWhiteSpace(adapterId) || !adapterId.Contains(':'))
+            if (!IsChildRunBinding(adapterId))
                 continue;
             if (!seenAdapterIds.Add(adapterId))
                 continue;
 
-            // Find deliveries associated with this adapter instance via agent_instance_id in metadata
+            var bindingRunId = TryParseRunId(adapterId);
+
+            // Find deliveries associated with this adapter instance via concrete routing metadata.
+            // Do not mark every child under the same supervisor busy just because one sibling has work.
             var childDeliveries = deliveries
-                .Where(d => !IsTerminal(d.Status))
+                .Where(d => !IsTerminal(d.Status) && DeliveryMatchesChildBinding(d, binding, adapterId, bindingRunId))
                 .ToList();
 
             var flags = new List<string>();
@@ -722,16 +730,49 @@ public sealed class GatewayStateOverviewService
         return results;
     }
 
-    private static string? TryParseProfileIdentity(string? adapterInstanceId)
+    private static bool DeliveryMatchesChildBinding(DeliveryRow delivery, BindingRow binding, string adapterInstanceId, string? bindingRunId)
+    {
+        if (!string.IsNullOrWhiteSpace(delivery.AgentInstanceId)
+            && string.Equals(delivery.AgentInstanceId, adapterInstanceId, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (!string.IsNullOrWhiteSpace(delivery.RunId)
+            && !string.IsNullOrWhiteSpace(bindingRunId)
+            && string.Equals(delivery.RunId, bindingRunId, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return false;
+    }
+
+    private static bool IsChildRunBinding(string? adapterInstanceId)
     {
         if (string.IsNullOrWhiteSpace(adapterInstanceId))
+            return false;
+
+        // Child-run pattern: hermes:{host}:{profile}:{run_id}. Profile-level
+        // live bindings such as hermes:den-k8:spawned-coder:pool-coder-01:live
+        // intentionally do not match.
+        var parts = adapterInstanceId.Split(':');
+        return parts.Length == 4
+            && parts[0].Equals("hermes", StringComparison.OrdinalIgnoreCase)
+            && parts[3].StartsWith("piw_", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? TryParseProfileIdentity(string? adapterInstanceId)
+    {
+        if (!IsChildRunBinding(adapterInstanceId))
             return null;
 
         // Expected pattern: hermes:{host}:{profile}:{run_id}
-        var parts = adapterInstanceId.Split(':');
-        if (parts.Length >= 3)
-            return parts[2]; // profile identity is the 3rd segment
-        return null;
+        return adapterInstanceId!.Split(':')[2];
+    }
+
+    private static string? TryParseRunId(string? adapterInstanceId)
+    {
+        if (!IsChildRunBinding(adapterInstanceId))
+            return null;
+
+        return adapterInstanceId!.Split(':')[3];
     }
 
     private sealed record BindingRow(long Id, string AdapterKind, string AdapterInstanceId, string? AgentIdentity, string? ProjectId, string? Role, string Status, DateTimeOffset? LastSeenAt, DateTimeOffset? ExpiresAt, DateTimeOffset CreatedAt);
@@ -765,6 +806,8 @@ public sealed class GatewayStateOverviewService
         string? WorkerIdentity,
         string? WorkerRole,
         string? AssignmentPurpose,
+        string? AgentInstanceId,
+        string? PoolMemberId,
         string? RunId,
         GatewayDeliveryAttemptOverview? LastAttempt);
 }

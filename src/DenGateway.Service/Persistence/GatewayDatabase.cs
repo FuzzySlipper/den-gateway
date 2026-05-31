@@ -575,7 +575,12 @@ public sealed class GatewayDatabase
                    delivery_mode, context_summary, context_link, metadata_json, dedupe_key, attempt_count,
                    assignment_id, worker_identity, worker_role, assignment_purpose,
                    agent_instance_id, pool_member_id,
-                   json_extract(metadata_json, '$.summary_metadata.runId') as run_id
+                   COALESCE(
+                       json_extract(metadata_json, '$.summary_metadata.runId'),
+                       json_extract(metadata_json, '$.summary_metadata.workerRunId'),
+                       json_extract(metadata_json, '$.run_id'),
+                       json_extract(metadata_json, '$.workerRunId'),
+                       json_extract(metadata_json, '$.worker_run_id')) as run_id
             FROM delivery_requests
             WHERE status = 'pending'
               AND delivery_mode IN ({string.Join(", ", modeParameters)})

@@ -144,10 +144,13 @@ public sealed class BindingSnapshotService
         if (string.IsNullOrWhiteSpace(adapterInstanceId))
             return false;
 
-        // Child-run pattern: hermes:{host}:{profile}:{run_id}
-        // Has exactly 3 colons after the adapter kind prefix
-        return adapterInstanceId.StartsWith("hermes:", StringComparison.OrdinalIgnoreCase)
-            && adapterInstanceId.Count(c => c == ':') >= 3;
+        // Child-run pattern: hermes:{host}:{profile}:{run_id}. Profile-level
+        // live bindings such as hermes:den-k8:spawned-coder:pool-coder-01:live
+        // intentionally do not match.
+        var parts = adapterInstanceId.Split(':');
+        return parts.Length == 4
+            && parts[0].Equals("hermes", StringComparison.OrdinalIgnoreCase)
+            && parts[3].StartsWith("piw_", StringComparison.OrdinalIgnoreCase);
     }
 }
 

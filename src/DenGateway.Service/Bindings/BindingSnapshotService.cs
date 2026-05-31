@@ -127,30 +127,16 @@ public sealed class BindingSnapshotService
 
         if (row.LastSeenAt is not null && row.LastSeenAt.Value.AddMinutes(_settings.BindingTtlMinutes) <= now)
         {
-            return IsChildRunBinding(row.AdapterInstanceId) ? "child_run_ttl_expired" : "ttl_expired";
+            return ChildRunBindingIdentity.IsChildRunBinding(row.AdapterInstanceId) ? "child_run_ttl_expired" : "ttl_expired";
         }
 
         if (!string.Equals(row.Status, "active", StringComparison.OrdinalIgnoreCase)
             && !string.Equals(row.Status, "degraded", StringComparison.OrdinalIgnoreCase))
         {
-            return IsChildRunBinding(row.AdapterInstanceId) ? "child_run_inactive" : "inactive";
+            return ChildRunBindingIdentity.IsChildRunBinding(row.AdapterInstanceId) ? "child_run_inactive" : "inactive";
         }
 
         return null;
-    }
-
-    private static bool IsChildRunBinding(string adapterInstanceId)
-    {
-        if (string.IsNullOrWhiteSpace(adapterInstanceId))
-            return false;
-
-        // Child-run pattern: hermes:{host}:{profile}:{run_id}. Profile-level
-        // live bindings such as hermes:den-k8:spawned-coder:pool-coder-01:live
-        // intentionally do not match.
-        var parts = adapterInstanceId.Split(':');
-        return parts.Length == 4
-            && parts[0].Equals("hermes", StringComparison.OrdinalIgnoreCase)
-            && parts[3].StartsWith("piw_", StringComparison.OrdinalIgnoreCase);
     }
 }
 

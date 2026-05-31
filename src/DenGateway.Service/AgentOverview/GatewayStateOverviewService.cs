@@ -1,4 +1,5 @@
 using System.Globalization;
+using DenGateway.Service.Bindings;
 using DenGateway.Service.Persistence;
 using Microsoft.Data.Sqlite;
 
@@ -118,7 +119,7 @@ public sealed class GatewayStateOverviewService
 
             // Detect profile identity from first binding's adapter instance pattern
             var profileIdentity = fallbackBindings.Count > 0
-                ? TryParseProfileIdentity(fallbackBindings[0].AdapterInstanceId)
+                ? ChildRunBindingIdentity.TryParseProfileIdentity(fallbackBindings[0].AdapterInstanceId)
                 : null;
 
             agents.Add(new GatewayStateGroup(
@@ -662,12 +663,12 @@ public sealed class GatewayStateOverviewService
         foreach (var binding in bindings)
         {
             var adapterId = binding.AdapterInstanceId;
-            if (!IsChildRunBinding(adapterId))
+            if (!ChildRunBindingIdentity.IsChildRunBinding(adapterId))
                 continue;
             if (!seenAdapterIds.Add(adapterId))
                 continue;
 
-            var bindingRunId = TryParseRunId(adapterId);
+            var bindingRunId = ChildRunBindingIdentity.TryParseRunId(adapterId);
 
             // Find deliveries associated with this adapter instance via concrete routing metadata.
             // Do not mark every child under the same supervisor busy just because one sibling has work.
@@ -742,37 +743,6 @@ public sealed class GatewayStateOverviewService
             return true;
 
         return false;
-    }
-
-    private static bool IsChildRunBinding(string? adapterInstanceId)
-    {
-        if (string.IsNullOrWhiteSpace(adapterInstanceId))
-            return false;
-
-        // Child-run pattern: hermes:{host}:{profile}:{run_id}. Profile-level
-        // live bindings such as hermes:den-k8:spawned-coder:pool-coder-01:live
-        // intentionally do not match.
-        var parts = adapterInstanceId.Split(':');
-        return parts.Length == 4
-            && parts[0].Equals("hermes", StringComparison.OrdinalIgnoreCase)
-            && parts[3].StartsWith("piw_", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string? TryParseProfileIdentity(string? adapterInstanceId)
-    {
-        if (!IsChildRunBinding(adapterInstanceId))
-            return null;
-
-        // Expected pattern: hermes:{host}:{profile}:{run_id}
-        return adapterInstanceId!.Split(':')[2];
-    }
-
-    private static string? TryParseRunId(string? adapterInstanceId)
-    {
-        if (!IsChildRunBinding(adapterInstanceId))
-            return null;
-
-        return adapterInstanceId!.Split(':')[3];
     }
 
     private sealed record BindingRow(long Id, string AdapterKind, string AdapterInstanceId, string? AgentIdentity, string? ProjectId, string? Role, string Status, DateTimeOffset? LastSeenAt, DateTimeOffset? ExpiresAt, DateTimeOffset CreatedAt);

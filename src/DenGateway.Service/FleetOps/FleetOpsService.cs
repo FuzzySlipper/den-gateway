@@ -117,12 +117,14 @@ public sealed partial class FleetOpsService
 
         // 6. Build the command (resolved executable + fixed argv)
         var isDryRun = request.DryRun && action.SupportsDryRun;
-        var (executable, argv) = BuildCommand(action, args, isDryRun);
+        var builtCommand = BuildCommand(action, args, isDryRun);
 
-        if (executable is null && argv is null)
+        if (builtCommand is null)
         {
             return CreateErrorRun(runId, actionId, request, now, $"Action '{actionId}' has no executable or systemctl template configured");
         }
+
+        var (executable, argv) = builtCommand.Value;
 
         // 7. Create and store the run record
         var run = new FleetOpsActionRun(
@@ -231,8 +233,11 @@ public sealed partial class FleetOpsService
     /// <summary>
     /// Build the resolved executable path and fixed argv from a typed action definition.
     /// No API path/body value becomes an executable path — only registry data.
+    /// For systemctl-based actions, the executable is always the configured SystemctlPath
+    /// (e.g. "systemctl") and the template provides the sub-command arguments
+    /// (e.g. "--user restart hermes-gateway@{profile}.service").
     /// </summary>
-    private static (string? Executable, string[]? Args) BuildCommand(FleetOpsAction action, IReadOnlyDictionary<string, string> args, bool isDryRun)
+    internal (string Executable, string[] Args)? BuildCommand(FleetOpsAction action, IReadOnlyDictionary<string, string> args, bool isDryRun)
     {
         // For systemctl-based actions
         if (action.SystemctlTemplate is not null)
@@ -242,20 +247,33 @@ public sealed partial class FleetOpsService
                 : action.SystemctlTemplate;
 
             var command = SubstituteTemplate(template, args);
-            if (command is null) return (null, null);
+            if (command is null) return null;
 
             var parts = command.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            if (parts.Length < 1) return (null, null);
+            if (parts.Length < 1) return null;
 
-            return (parts[0], parts[1..]);
+            // The executable is the configured systemctl binary (e.g. "systemctl"),
+            // NOT the first token from the template (which would be a sub-command like "restart").
+            var argv = new List<string>();
+            argv.Add("--user");
+            foreach (var part in parts)
+                argv.Add(part);
+
+            return (_options.SystemctlPath, argv.ToArray());
         }
 
         // For script-based actions
         if (action.ScriptPath is not null)
         {
-            var scriptPath = isDryRun && action.DryRunScriptPath is not null
+            var scriptName = isDryRun && action.DryRunScriptPath is not null
                 ? action.DryRunScriptPath
                 : action.ScriptPath;
+
+            // Resolve script names from the configured ScriptsDirectory.
+            // Only the registry-defined script names are used; no API input reaches here.
+            var resolvedScriptPath = scriptName.Contains('/') || scriptName.Contains('\\')
+                ? scriptName
+                : Path.Combine(_options.ScriptsDirectory, scriptName);
 
             var argv = new List<string>();
 
@@ -274,10 +292,10 @@ public sealed partial class FleetOpsService
                 }
             }
 
-            return (scriptPath, argv.ToArray());
+            return (resolvedScriptPath, argv.ToArray());
         }
 
-        return (null, null);
+        return null;
     }
 
     /// <summary>

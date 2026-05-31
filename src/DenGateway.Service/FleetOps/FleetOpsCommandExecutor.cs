@@ -3,7 +3,7 @@ using System.Diagnostics;
 namespace DenGateway.Service.FleetOps;
 
 /// <summary>
-/// Abstraction for executing commands against the fleet scripts directory.
+/// Abstraction for executing commands with resolved executable paths and fixed argv.
 /// Only registry/service code builds executable + argv from typed actions.
 /// </summary>
 public interface IFleetOpsCommandExecutor
@@ -16,8 +16,9 @@ public interface IFleetOpsCommandExecutor
 }
 
 /// <summary>
-/// Executes commands using System.Diagnostics.Process against a configured script directory.
-/// Only accepts resolved executable paths and fixed argv from typed action definitions.
+/// Executes commands using System.Diagnostics.Process.
+/// Accepts only fully-resolved executable paths and fixed argv from FleetOpsService.BuildCommand.
+/// No path resolution or script directory lookup is performed by this executor.
 /// </summary>
 public sealed class ProcessFleetOpsCommandExecutor : IFleetOpsCommandExecutor
 {
@@ -35,10 +36,11 @@ public sealed class ProcessFleetOpsCommandExecutor : IFleetOpsCommandExecutor
         if (string.IsNullOrWhiteSpace(executable))
             throw new ArgumentException("Executable cannot be empty", nameof(executable));
 
-        // If executable is a script name (no path separators), resolve from script directory
-        var resolvedPath = executable.Contains('/') || executable.Contains('\\')
-            ? executable
-            : Path.Combine(_options.ScriptsDirectory, executable);
+        // The executable path is already fully resolved by FleetOpsService.BuildCommand:
+        //   - Script-based actions: resolved from ScriptsDirectory in the service layer
+        //   - Systemctl-based actions: the configured SystemctlPath (e.g. "systemctl")
+        // No further resolution or path lookup is performed here.
+        var resolvedPath = executable;
 
         try
         {

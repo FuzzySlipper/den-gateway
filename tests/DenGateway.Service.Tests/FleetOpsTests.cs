@@ -227,7 +227,7 @@ public class FleetOpsTests
         var result = await service.ExecuteActionAsync("restart-all", request);
 
         Assert.Equal("completed", result.Status);
-        Assert.Equal("restart-agent-services", recordedDir);
+        Assert.Equal("/home/agents/local/hermes-fleet/bin/restart-agent-services", recordedDir);
         Assert.Contains("--yes", recordedArgs);
     }
 
@@ -436,6 +436,188 @@ public class FleetOpsTests
         // Dry-run restart-failed should not invoke --yes or --failed-only
         Assert.DoesNotContain("--yes", recordedArgs);
         Assert.DoesNotContain("--failed-only", recordedArgs);
+    }
+
+    // ===================== Restart-Profile Service-Level Execution Tests =====================
+
+    [Fact]
+    public async Task RestartProfile_ExecutesSystemctlWithCorrectExecutableAndArgv()
+    {
+        string? recordedExec = null;
+        string[]? recordedArgs = null;
+
+        var service = CreateService(
+            executorHandler: async (exec, args, _, _) =>
+            {
+                recordedExec = exec;
+                recordedArgs = args;
+                return new CommandResult(0, ["active"], [], null);
+            },
+            units: [new("hermes-gateway@spawned-coder.service", "spawned-coder", "active", "running")]);
+
+        var request = new FleetOpsActionRunRequest("restart-profile", DryRun: false,
+            Args: new Dictionary<string, string> { ["profile"] = "spawned-coder" });
+        var result = await service.ExecuteActionAsync("restart-profile", request);
+
+        Assert.Equal("completed", result.Status);
+        Assert.NotNull(recordedExec);
+        Assert.NotNull(recordedArgs);
+
+        // Executable must be the configured systemctl binary, NOT a resolved script path
+        Assert.Equal("systemctl", recordedExec);
+
+        // Argv must include --user, restart sub-command, and the fully-qualified unit name
+        Assert.Contains("--user", recordedArgs);
+        Assert.Contains("restart", recordedArgs);
+        Assert.Contains("hermes-gateway@spawned-coder.service", recordedArgs);
+
+        // Must NOT contain bare "restart" as the executable or any scripts-directory path
+        Assert.DoesNotContain(recordedArgs, a => a.Contains("/home/agents/local/hermes-fleet/bin"));
+    }
+
+    [Fact]
+    public async Task RestartProfile_DryRun_UsesIsActivTemplate()
+    {
+        string? recordedExec = null;
+        string[]? recordedArgs = null;
+
+        var service = CreateService(
+            executorHandler: async (exec, args, _, _) =>
+            {
+                recordedExec = exec;
+                recordedArgs = args;
+                return new CommandResult(0, ["active"], [], null);
+            },
+            units: [new("hermes-gateway@runner.service", "runner", "active", "running")]);
+
+        var request = new FleetOpsActionRunRequest("restart-profile", DryRun: true,
+            Args: new Dictionary<string, string> { ["profile"] = "runner" });
+        var result = await service.ExecuteActionAsync("restart-profile", request);
+
+        Assert.Equal("completed", result.Status);
+        Assert.True(result.WasDryRun);
+        Assert.NotNull(recordedExec);
+        Assert.Equal("systemctl", recordedExec);
+
+        // Dry-run uses is-active template, not restart
+        Assert.Contains("--user", recordedArgs!);
+        Assert.Contains("is-active", recordedArgs);
+        Assert.Contains("hermes-gateway@runner.service", recordedArgs);
+        Assert.DoesNotContain("restart", recordedArgs);
+    }
+
+    [Fact]
+    public async Task RestartProfile_RejectsUnknownProfile_NotInDiscoveredUnits()
+    {
+        var service = CreateService(
+            executorHandler: async (exec, args, _, _) =>
+                new CommandResult(0, ["active"], [], null),
+            units: [new("hermes-gateway@spawned-coder.service", "spawned-coder", "active", "running")]);
+
+        var request = new FleetOpsActionRunRequest("restart-profile", DryRun: false,
+            Args: new Dictionary<string, string> { ["profile"] = "unknown-profile" });
+        var result = await service.ExecuteActionAsync("restart-profile", request);
+
+        Assert.Equal("failed", result.Status);
+        Assert.NotNull(result.ErrorMessage);
+        Assert.Contains("unknown-profile", result.ErrorMessage);
+    }
+
+    [Fact]
+    public async Task RestartProfile_RejectsWhenDiscoveryReturnsEmpty()
+    {
+        var service = CreateService(
+            executorHandler: async (exec, args, _, _) =>
+                new CommandResult(0, ["active"], [], null),
+            simulateDiscoveryFailure: true);
+
+        var request = new FleetOpsActionRunRequest("restart-profile", DryRun: false,
+            Args: new Dictionary<string, string> { ["profile"] = "spawned-coder" });
+        var result = await service.ExecuteActionAsync("restart-profile", request);
+
+        Assert.Equal("failed", result.Status);
+        Assert.NotNull(result.ErrorMessage);
+    }
+
+    [Fact]
+    public void BuildCommand_RestartProfile_UsesSystemctlPathAsExecutable()
+    {
+        // Directly test BuildCommand to verify executable/argv structure
+        var options = new FleetOpsOptions
+        {
+            SystemctlPath = "/usr/bin/systemctl",
+            ScriptsDirectory = "/home/agents/local/hermes-fleet/bin",
+        };
+        var registry = new FleetOpsActionRegistry();
+        var loggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(b => { });
+        var service = new FleetOpsService(
+            registry,
+            new StubFleetOpsDiscovery(),
+            new StubFleetOpsCommandExecutor(),
+            new InMemoryFleetOpsRunStore(),
+            options,
+            loggerFactory.CreateLogger<FleetOpsService>());
+
+        var action = registry.GetById("restart-profile")!;
+        var args = new Dictionary<string, string> { ["profile"] = "spawned-coder" };
+        var cmd = service.BuildCommand(action, args, isDryRun: false);
+
+        Assert.NotNull(cmd);
+        Assert.Equal("/usr/bin/systemctl", cmd.Value.Executable);
+        Assert.Equal(["--user", "restart", "hermes-gateway@spawned-coder.service"], cmd.Value.Args);
+    }
+
+    [Fact]
+    public void BuildCommand_RestartProfile_DryRun_UsesIsActiveTemplate()
+    {
+        var options = new FleetOpsOptions
+        {
+            SystemctlPath = "systemctl",
+            ScriptsDirectory = "/home/agents/local/hermes-fleet/bin",
+        };
+        var registry = new FleetOpsActionRegistry();
+        var loggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(b => { });
+        var service = new FleetOpsService(
+            registry,
+            new StubFleetOpsDiscovery(),
+            new StubFleetOpsCommandExecutor(),
+            new InMemoryFleetOpsRunStore(),
+            options,
+            loggerFactory.CreateLogger<FleetOpsService>());
+
+        var action = registry.GetById("restart-profile")!;
+        var args = new Dictionary<string, string> { ["profile"] = "runner" };
+        var cmd = service.BuildCommand(action, args, isDryRun: true);
+
+        Assert.NotNull(cmd);
+        Assert.Equal("systemctl", cmd.Value.Executable);
+        Assert.Equal(["--user", "is-active", "hermes-gateway@runner.service"], cmd.Value.Args);
+    }
+
+    [Fact]
+    public void BuildCommand_ScriptAction_ResolvesFromScriptsDirectory()
+    {
+        var options = new FleetOpsOptions
+        {
+            SystemctlPath = "systemctl",
+            ScriptsDirectory = "/opt/hermes/bin",
+        };
+        var registry = new FleetOpsActionRegistry();
+        var loggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(b => { });
+        var service = new FleetOpsService(
+            registry,
+            new StubFleetOpsDiscovery(),
+            new StubFleetOpsCommandExecutor(),
+            new InMemoryFleetOpsRunStore(),
+            options,
+            loggerFactory.CreateLogger<FleetOpsService>());
+
+        var action = registry.GetById("fleet-status")!;
+        var args = new Dictionary<string, string>();
+        var cmd = service.BuildCommand(action, args, isDryRun: false);
+
+        Assert.NotNull(cmd);
+        Assert.Equal("/opt/hermes/bin/restart-agent-services", cmd.Value.Executable);
     }
 
     // ===================== Private Helpers =====================

@@ -1,0 +1,36 @@
+[Unit]
+Description=Den Gateway Service (den-srv live FleetOps/API)
+After=network-online.target den-core.service den-channels.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agent
+Group=agents
+WorkingDirectory=/data/services/den-gateway/publish
+ExecStart=/data/services/den-gateway/publish/DenGateway.Service --urls http://127.0.0.1:5300
+Environment=ASPNETCORE_ENVIRONMENT=Production
+Environment=DenGateway__Database__Path=/data/services/den-gateway/data/den-gateway.db
+Environment=DenGateway__DenCore__BaseUrl=http://127.0.0.1:5299
+Environment=DenGateway__DenCore__UseStub=false
+Environment=DenGateway__DenChannels__BaseUrl=http://127.0.0.1:18081
+Environment=DenGateway__DenChannels__UseStub=false
+# FleetOps is the only live route exposed through Den Web for this rollout.
+# Keep the delivery loop disabled here to avoid changing live routing/delivery behavior
+# merely by deploying the FleetOps cockpit backend.
+Environment=DenGateway__DeliveryLoop__Enabled=false
+Environment=FleetOps__ScriptsDirectory=/home/agents/local/hermes-fleet/bin
+Environment=FleetOps__SystemctlPath=systemctl
+Environment=FleetOps__RestartActionCooldownSeconds=30
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/data/services/den-gateway
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+[Install]
+WantedBy=multi-user.target

@@ -8,6 +8,7 @@ public interface IDenCoreClient
     Task<ClientValueResult<SourceSummary>> GetSourceSummaryAsync(string sourceKind, string sourceId, string? projectId, CancellationToken cancellationToken = default);
     Task<ClientListResult<GatewayOutboxEvent>> ReadEventOutboxAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default);
     Task<ClientOperationResult> PostGatewayReconciliationEventsAsync(IReadOnlyList<GatewayReconciliationEvent> events, CancellationToken cancellationToken = default);
+    Task<ClientListResult<UserNotificationFeedItem>> ListUserNotificationsAsync(int? limit = null, string? projectId = null, string? after = null, CancellationToken cancellationToken = default);
 }
 
 public interface IDenChannelsClient
@@ -66,6 +67,13 @@ public sealed class StubDenCoreClient : IDenCoreClient
         return Task.FromResult(ClientOperationResult.Unavailable(
             "not_implemented",
             "Den Core Gateway sentinel reconciliation endpoint is not implemented yet; tracked by den-mcp Gateway integration follow-up."));
+    }
+
+    public Task<ClientListResult<UserNotificationFeedItem>> ListUserNotificationsAsync(int? limit = null, string? projectId = null, string? after = null, CancellationToken cancellationToken = default)
+    {
+        return Task.FromResult(ClientListResult<UserNotificationFeedItem>.Unavailable(
+            "not_implemented",
+            "Den Core user-notification feed is not polled in stub mode."));
     }
 }
 
@@ -281,3 +289,13 @@ public sealed record ChannelEventSnapshot(
     string SourceId,
     string DedupeKey,
     DateTimeOffset OccurredAt);
+
+public sealed record UserNotificationFeedItem(
+    string Id,
+    string? ProjectId,
+    string? TaskId,
+    string? Sender,
+    string? Content,
+    IReadOnlyDictionary<string, string> Metadata,
+    string Urgency,
+    DateTimeOffset CreatedAt);

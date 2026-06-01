@@ -113,6 +113,7 @@ public class GatewayChannelProjectDiscoveryTests
         public Task<ClientValueResult<SourceSummary>> GetSourceSummaryAsync(string sourceKind, string sourceId, string? projectId, CancellationToken cancellationToken = default) => Task.FromResult(ClientValueResult<SourceSummary>.Unavailable("not_found", "missing"));
         public Task<ClientListResult<GatewayOutboxEvent>> ReadEventOutboxAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default) => Task.FromResult(ClientListResult<GatewayOutboxEvent>.Available([]));
         public Task<ClientOperationResult> PostGatewayReconciliationEventsAsync(IReadOnlyList<GatewayReconciliationEvent> events, CancellationToken cancellationToken = default) => Task.FromResult(ClientOperationResult.Completed("ok"));
+        public Task<ClientListResult<UserNotificationFeedItem>> ListUserNotificationsAsync(int? limit = null, string? projectId = null, string? after = null, CancellationToken cancellationToken = default) => Task.FromResult(ClientListResult<UserNotificationFeedItem>.Unavailable("not_implemented", "stub"));
     }
 
     private sealed class FakeChannelsClient : IDenChannelsClient

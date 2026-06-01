@@ -187,6 +187,100 @@ public sealed class HttpDenCoreClient : IDenCoreClient
         return ClientOperationResult.Completed("Den Core accepted Gateway reconciliation events.");
     }
 
+    public async Task<ClientListResult<UserNotificationFeedItem>> ListUserNotificationsAsync(int? limit = null, string? projectId = null, string? after = null, CancellationToken cancellationToken = default)
+    {
+        _ = after; // Core's canonical feed currently uses offset pagination; Gateway mirrors apply their own durable high-water cursor.
+        var query = new List<string>();
+        if (limit.HasValue)
+        {
+            query.Add($"limit={Math.Clamp(limit.Value, 1, 200)}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(projectId))
+        {
+            query.Add($"projectId={Uri.EscapeDataString(projectId)}");
+        }
+
+        var path = "api/user-notifications";
+        if (query.Count > 0)
+        {
+            path += $"?{string.Join('&', query)}";
+        }
+
+        var response = await _httpClient.GetAsync(path, cancellationToken);
+        if (!response.IsSuccessStatusCode)
+        {
+            return ClientListResult<UserNotificationFeedItem>.Unavailable($"http_{(int)response.StatusCode}", "Den Core user-notification feed read failed.");
+        }
+
+        var root = await response.Content.ReadFromJsonAsync<JsonElement>(JsonOptions, cancellationToken);
+        if (root.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+        {
+            return ClientListResult<UserNotificationFeedItem>.Unavailable("invalid_response", "Den Core user-notification feed returned an empty or invalid response.");
+        }
+
+        IEnumerable<JsonElement> sourceItems = root.ValueKind == JsonValueKind.Array
+            ? root.EnumerateArray().ToArray()
+            : root.ValueKind == JsonValueKind.Object && root.TryGetProperty("items", out var itemsElement) && itemsElement.ValueKind == JsonValueKind.Array
+                ? itemsElement.EnumerateArray().ToArray()
+                : Array.Empty<JsonElement>();
+
+        var items = sourceItems
+            .Select(ToUserNotificationFeedItem)
+            .Where(item => !string.IsNullOrWhiteSpace(item.Id))
+            .ToArray();
+
+        return ClientListResult<UserNotificationFeedItem>.Available(items);
+    }
+
+    private static UserNotificationFeedItem ToUserNotificationFeedItem(JsonElement item)
+    {
+        var metadata = item.TryGetProperty("metadata", out var metadataElement)
+            ? FlattenMetadata(metadataElement)
+            : new Dictionary<string, string>();
+        var urgency = GetString(item, "urgency");
+        if (string.IsNullOrWhiteSpace(urgency) && metadata.TryGetValue("urgency", out var metadataUrgency))
+        {
+            urgency = metadataUrgency;
+        }
+
+        return new UserNotificationFeedItem(
+            Id: GetScalarString(item, "id") ?? string.Empty,
+            ProjectId: GetString(item, "project_id"),
+            TaskId: GetScalarString(item, "task_id"),
+            Sender: GetString(item, "sender"),
+            Content: GetString(item, "content"),
+            Metadata: metadata,
+            Urgency: string.IsNullOrWhiteSpace(urgency) ? "normal" : urgency,
+            CreatedAt: ParseDateTimeOffset(GetString(item, "created_at") ?? string.Empty));
+    }
+
+    private static string? GetString(JsonElement item, string propertyName)
+    {
+        return item.ValueKind == JsonValueKind.Object
+            && item.TryGetProperty(propertyName, out var value)
+            && value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : null;
+    }
+
+    private static string? GetScalarString(JsonElement item, string propertyName)
+    {
+        if (item.ValueKind != JsonValueKind.Object || !item.TryGetProperty(propertyName, out var value))
+        {
+            return null;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Number => value.ToString(),
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            _ => null
+        };
+    }
+
     private static GatewayBindingSnapshot ToSnapshot(GatewayBindingDto dto)
     {
         var metadata = new Dictionary<string, string>(dto.Metadata ?? new Dictionary<string, string>(), StringComparer.Ordinal)
@@ -327,4 +421,17 @@ public sealed class HttpDenCoreClient : IDenCoreClient
         [property: JsonPropertyName("cursor")] string? Cursor,
         [property: JsonPropertyName("metadata")] IReadOnlyDictionary<string, string> Metadata,
         [property: JsonPropertyName("dedupe_key")] string DedupeKey);
+
+    private sealed record UserNotificationFeedDto(
+        [property: JsonPropertyName("items")] IReadOnlyList<UserNotificationItemDto> Items);
+
+    private sealed record UserNotificationItemDto(
+        [property: JsonPropertyName("id")] string Id,
+        [property: JsonPropertyName("project_id")] string? ProjectId,
+        [property: JsonPropertyName("task_id")] string? TaskId,
+        [property: JsonPropertyName("sender")] string? Sender,
+        [property: JsonPropertyName("content")] string? Content,
+        [property: JsonPropertyName("metadata")] IReadOnlyDictionary<string, string>? Metadata,
+        [property: JsonPropertyName("urgency")] string? Urgency,
+        [property: JsonPropertyName("created_at")] string CreatedAt);
 }

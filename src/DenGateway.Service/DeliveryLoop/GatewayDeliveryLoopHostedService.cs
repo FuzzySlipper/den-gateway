@@ -1,3 +1,4 @@
+using DenGateway.Service.NotificationMirror;
 using Microsoft.Extensions.Options;
 
 namespace DenGateway.Service.DeliveryLoop;
@@ -6,31 +7,38 @@ public sealed class GatewayDeliveryLoopHostedService : BackgroundService
 {
     private readonly GatewayDeliveryLoopService _deliveryLoop;
     private readonly GatewayChannelProjectDiscoveryService _projectDiscovery;
+    private readonly GatewayNotificationMirrorService? _notificationMirror;
     private readonly IOptions<DenGatewayOptions> _options;
     private readonly ILogger<GatewayDeliveryLoopHostedService> _logger;
 
     public GatewayDeliveryLoopHostedService(
         GatewayDeliveryLoopService deliveryLoop,
         GatewayChannelProjectDiscoveryService projectDiscovery,
+        GatewayNotificationMirrorService? notificationMirror,
         IOptions<DenGatewayOptions> options,
         ILogger<GatewayDeliveryLoopHostedService> logger)
     {
         _deliveryLoop = deliveryLoop;
         _projectDiscovery = projectDiscovery;
+        _notificationMirror = notificationMirror;
         _options = options;
         _logger = logger;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        var options = _options.Value.DeliveryLoop;
-        if (!options.Enabled)
+        var deliveryOptions = _options.Value.DeliveryLoop;
+        var mirrorOptions = _options.Value.NotificationLaneMirror;
+        if (!deliveryOptions.Enabled && !mirrorOptions.Enabled)
         {
-            _logger.LogInformation("Gateway delivery loop background poller disabled by configuration.");
+            _logger.LogInformation("Gateway delivery loop and notification mirror background pollers disabled by configuration.");
             return;
         }
 
-        var interval = TimeSpan.FromSeconds(Math.Max(1, options.PollIntervalSeconds));
+        var pollSeconds = deliveryOptions.Enabled
+            ? deliveryOptions.PollIntervalSeconds
+            : mirrorOptions.PollIntervalSeconds;
+        var interval = TimeSpan.FromSeconds(Math.Max(1, pollSeconds));
         using var timer = new PeriodicTimer(interval);
 
         await PollSafelyAsync(stoppingToken);
@@ -45,35 +53,59 @@ public sealed class GatewayDeliveryLoopHostedService : BackgroundService
         try
         {
             var options = _options.Value.DeliveryLoop;
-            foreach (var request in await BuildPollRequestsAsync(options, cancellationToken))
+            if (options.Enabled)
             {
-                var result = await _deliveryLoop.PollOnceAsync(request, cancellationToken);
+                foreach (var request in await BuildPollRequestsAsync(options, cancellationToken))
+                {
+                    var result = await _deliveryLoop.PollOnceAsync(request, cancellationToken);
 
-                if (result.Status == "degraded" || result.Status == "rejected")
+                    if (result.Status == "degraded" || result.Status == "rejected")
+                    {
+                        _logger.LogWarning(
+                            "Gateway delivery loop poll returned {Status} for {Source}/{ProjectId}/{ChannelId}: {ErrorCode} {Message}",
+                            result.Status,
+                            request.Source,
+                            request.ProjectId ?? "*",
+                            request.GetChannelId() ?? "*",
+                            result.ErrorCode,
+                            result.Message);
+                        continue;
+                    }
+
+                    if (result.CreatedCount > 0 || result.SuppressedCount > 0 || result.DuplicateCount > 0)
+                    {
+                        _logger.LogInformation(
+                            "Gateway delivery loop poll completed for {Source}/{ProjectId}/{ChannelId}: seen={SeenCount}, created={CreatedCount}, duplicates={DuplicateCount}, suppressed={SuppressedCount}, nextCursor={NextCursor}",
+                            request.Source,
+                            request.ProjectId ?? "*",
+                            request.GetChannelId() ?? "*",
+                            result.SeenCount,
+                            result.CreatedCount,
+                            result.DuplicateCount,
+                            result.SuppressedCount,
+                            result.NextCursor);
+                    }
+                }
+            }
+
+            // Poll notification mirror if available
+            if (_notificationMirror is not null && _options.Value.NotificationLaneMirror.Enabled)
+            {
+                var mirrorResult = await _notificationMirror.PollAndMirrorOnceAsync(cancellationToken);
+                if (mirrorResult.Status == "degraded")
                 {
                     _logger.LogWarning(
-                        "Gateway delivery loop poll returned {Status} for {Source}/{ProjectId}/{ChannelId}: {ErrorCode} {Message}",
-                        result.Status,
-                        request.Source,
-                        request.ProjectId ?? "*",
-                        request.GetChannelId() ?? "*",
-                        result.ErrorCode,
-                        result.Message);
-                    continue;
+                        "Gateway notification mirror poll degraded: {ErrorCode} {Message}",
+                        mirrorResult.ErrorCode,
+                        mirrorResult.Message);
                 }
-
-                if (result.CreatedCount > 0 || result.SuppressedCount > 0 || result.DuplicateCount > 0)
+                else if (mirrorResult.MirroredCount > 0 || mirrorResult.SkippedCount > 0)
                 {
                     _logger.LogInformation(
-                        "Gateway delivery loop poll completed for {Source}/{ProjectId}/{ChannelId}: seen={SeenCount}, created={CreatedCount}, duplicates={DuplicateCount}, suppressed={SuppressedCount}, nextCursor={NextCursor}",
-                        request.Source,
-                        request.ProjectId ?? "*",
-                        request.GetChannelId() ?? "*",
-                        result.SeenCount,
-                        result.CreatedCount,
-                        result.DuplicateCount,
-                        result.SuppressedCount,
-                        result.NextCursor);
+                        "Gateway notification mirror poll completed: mirrored={MirroredCount}, duplicates={DuplicateCount}, skipped={SkippedCount}",
+                        mirrorResult.MirroredCount,
+                        mirrorResult.DuplicateCount,
+                        mirrorResult.SkippedCount);
                 }
             }
         }

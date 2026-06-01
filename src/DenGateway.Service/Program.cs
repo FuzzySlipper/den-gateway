@@ -6,6 +6,7 @@ using DenGateway.Service.Deliveries;
 using DenGateway.Service.DeliveryLoop;
 using DenGateway.Service.DiscordBridge;
 using DenGateway.Service.FleetOps;
+using DenGateway.Service.NotificationMirror;
 using DenGateway.Service.Persistence;
 using Microsoft.Extensions.Options;
 using System.Text.Json.Serialization;
@@ -25,6 +26,7 @@ builder.Services.AddSingleton<BindingSnapshotService>();
 builder.Services.AddSingleton<ChannelActivityEventRouter>();
 builder.Services.AddSingleton<GatewayDeliveryLoopService>();
 builder.Services.AddSingleton<GatewayChannelProjectDiscoveryService>();
+builder.Services.AddSingleton<GatewayNotificationMirrorService>();
 builder.Services.AddHostedService<GatewayDeliveryLoopHostedService>();
 
 builder.Services.AddSingleton<GatewayStateOverviewService>();
@@ -356,6 +358,7 @@ public sealed class DenGatewayOptions
     public ServiceAuthOptions ServiceAuth { get; init; } = new();
     public SentinelOptions Sentinel { get; init; } = new();
     public DeliveryLoopOptions DeliveryLoop { get; init; } = new();
+    public NotificationLaneMirrorOptions NotificationLaneMirror { get; init; } = new();
 }
 
 public sealed class DatabaseOptions
@@ -433,3 +436,12 @@ public sealed record AdapterBindingHeartbeatRequest(
 }
 
 public sealed record AdapterBindingHeartbeatResponse([property: JsonPropertyName("binding_id")] long BindingId);
+
+public sealed class NotificationLaneMirrorOptions
+{
+    public bool Enabled { get; init; }
+    public string TargetChannelId { get; init; } = string.Empty;
+    public string[] IncludedMetadataTypes { get; init; } = ["agent_work_complete", "blocker", "failure"];
+    public int PollIntervalSeconds { get; init; } = 60;
+    public int Limit { get; init; } = 50;
+}

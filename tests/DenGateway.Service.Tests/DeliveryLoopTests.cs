@@ -1174,6 +1174,7 @@ public class DeliveryLoopTests
         }
         public Task<ClientListResult<GatewayOutboxEvent>> ReadEventOutboxAsync(string? after, string? projectId, int limit, CancellationToken cancellationToken = default) => Task.FromResult(OutboxAvailable ? ClientListResult<GatewayOutboxEvent>.Available(OutboxEvents.Take(limit).ToArray()) : ClientListResult<GatewayOutboxEvent>.Unavailable("offline", "core offline"));
         public Task<ClientOperationResult> PostGatewayReconciliationEventsAsync(IReadOnlyList<GatewayReconciliationEvent> events, CancellationToken cancellationToken = default) => Task.FromResult(ClientOperationResult.Completed("ok"));
+        public Task<ClientListResult<UserNotificationFeedItem>> ListUserNotificationsAsync(int? limit = null, string? projectId = null, string? after = null, CancellationToken cancellationToken = default) => Task.FromResult(ClientListResult<UserNotificationFeedItem>.Unavailable("not_implemented", "stub"));
     }
 
     private sealed class FakeDenChannelsClient : IDenChannelsClient

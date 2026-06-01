@@ -127,6 +127,7 @@ public class BindingSnapshotTests
             PostedEvents.AddRange(events);
             return Task.FromResult(ClientOperationResult.Completed("ok"));
         }
+        public Task<ClientListResult<UserNotificationFeedItem>> ListUserNotificationsAsync(int? limit = null, string? projectId = null, string? after = null, CancellationToken cancellationToken = default) => Task.FromResult(ClientListResult<UserNotificationFeedItem>.Unavailable("not_implemented", "stub"));
     }
 
     private sealed record BindingSnapshotListResponse(IReadOnlyList<BindingSnapshotDto> Items);

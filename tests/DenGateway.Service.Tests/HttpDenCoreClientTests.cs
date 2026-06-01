@@ -173,6 +173,42 @@ public class HttpDenCoreClientTests
         Assert.Equal("den-gateway-visible-agent-smoke:427203", item.DedupeKey);
     }
 
+    [Fact]
+    public async Task UserNotificationsReadsCanonicalCoreArrayShapeAndFlattensMetadata()
+    {
+        using var client = new HttpClient(new JsonHandler("""
+            [
+              {
+                "id": 9798,
+                "project_id": "den-gateway",
+                "task_id": 1792,
+                "sender": "den-mcp-runner",
+                "content": "Queue drain complete",
+                "metadata": {
+                  "type": "agent_work_complete",
+                  "urgency": "normal",
+                  "source_refs": [{"kind":"task","task_id":1792}]
+                },
+                "urgency": null,
+                "created_at": "2026-06-01T05:10:00Z"
+              }
+            ]
+            """))
+        {
+            BaseAddress = new Uri("http://den-core.test/")
+        };
+        var core = new HttpDenCoreClient(client);
+
+        var result = await core.ListUserNotificationsAsync(limit: 50, after: "9797");
+
+        Assert.True(result.IsAvailable);
+        var item = Assert.Single(result.Items);
+        Assert.Equal("9798", item.Id);
+        Assert.Equal("1792", item.TaskId);
+        Assert.Equal("agent_work_complete", item.Metadata["type"]);
+        Assert.Equal("normal", item.Urgency);
+    }
+
     private sealed class JsonHandler(string json) : HttpMessageHandler
     {
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)

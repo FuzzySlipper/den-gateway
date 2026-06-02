@@ -288,7 +288,13 @@ public sealed record ChannelEventSnapshot(
     string SourceKind,
     string SourceId,
     string DedupeKey,
-    DateTimeOffset OccurredAt);
+    DateTimeOffset OccurredAt,
+    string? TargetProjectId = null,
+    string? TargetTaskId = null,
+    string? AssignmentId = null,
+    string? RunId = null,
+    string? Role = null,
+    string? ProfileIdentity = null);
 
 public sealed record UserNotificationFeedItem(
     string Id,

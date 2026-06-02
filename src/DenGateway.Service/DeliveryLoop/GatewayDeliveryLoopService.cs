@@ -273,7 +273,8 @@ public sealed class GatewayDeliveryLoopService
                         ["direct_agent_target"] = directAgentTargetIdentity,
                         ["cascade_depth"] = cascadeDepth,
                         ["applied_policy_label"] = policyDecision.AppliedPolicyLabel,
-                        ["applied_override_key"] = policyDecision.AppliedOverrideKey
+                        ["applied_override_key"] = policyDecision.AppliedOverrideKey,
+                        ["target_work"] = BuildTargetWorkMetadata(channelEvent)
                     };
                     var suppressedCreate = await _database.CreateDeliveryRequestAsync(new DeliveryCreateRequest(
                         SourceKind: channelEvent.SourceKind,
@@ -323,7 +324,8 @@ public sealed class GatewayDeliveryLoopService
                     ["direct_agent_target"] = directAgentTargetIdentity,
                     ["cascade_depth"] = cascadeDepth,
                     ["applied_policy_label"] = policyDecision.AppliedPolicyLabel,
-                    ["applied_override_key"] = policyDecision.AppliedOverrideKey
+                    ["applied_override_key"] = policyDecision.AppliedOverrideKey,
+                    ["target_work"] = BuildTargetWorkMetadata(channelEvent)
                 };
                 var create = await _database.CreateDeliveryRequestAsync(new DeliveryCreateRequest(
                     SourceKind: channelEvent.SourceKind,
@@ -467,6 +469,36 @@ public sealed class GatewayDeliveryLoopService
         }
 
         return Uri.UnescapeDataString(parts[2]);
+    }
+
+    /// <summary>
+    /// Build target-work metadata from a Channels event snapshot.
+    /// Extracts targetProjectId, targetTaskId, assignmentId, runId, role,
+    /// and profileIdentity from the event's targetWork fields when available
+    /// (populated by Channels #1845). These are stored in the delivery's
+    /// metadata_json under the "target_work" key for downstream projections.
+    /// </summary>
+    private static Dictionary<string, string?>? BuildTargetWorkMetadata(ChannelEventSnapshot channelEvent)
+    {
+        if (string.IsNullOrWhiteSpace(channelEvent.TargetProjectId)
+            && string.IsNullOrWhiteSpace(channelEvent.TargetTaskId)
+            && string.IsNullOrWhiteSpace(channelEvent.AssignmentId)
+            && string.IsNullOrWhiteSpace(channelEvent.RunId)
+            && string.IsNullOrWhiteSpace(channelEvent.Role)
+            && string.IsNullOrWhiteSpace(channelEvent.ProfileIdentity))
+        {
+            return null;
+        }
+
+        return new Dictionary<string, string?>
+        {
+            ["targetProjectId"] = channelEvent.TargetProjectId,
+            ["targetTaskId"] = channelEvent.TargetTaskId,
+            ["assignmentId"] = channelEvent.AssignmentId,
+            ["runId"] = channelEvent.RunId,
+            ["role"] = channelEvent.Role,
+            ["profileIdentity"] = channelEvent.ProfileIdentity
+        };
     }
 
     private static int CalculateCascadeDepth(ChannelMessageSnapshot? message)

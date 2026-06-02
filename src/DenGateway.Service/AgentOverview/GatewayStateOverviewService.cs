@@ -197,6 +197,10 @@ public sealed class GatewayStateOverviewService
         if (delivery.AssignmentId is not null && IsStaleAssignment(delivery, now))
             flags.Add("stale_assignment");
 
+        // Build target-work projection from delivery metadata
+        var targetWork = BuildTargetWork(delivery);
+        var runtimeControl = BuildRuntimeControl(delivery);
+
         return new GatewayDeliveryOverview(
             DeliveryRequestId: delivery.Id,
             Status: delivery.Status,
@@ -224,7 +228,66 @@ public sealed class GatewayStateOverviewService
             WorkerIdentity: delivery.WorkerIdentity,
             WorkerRole: delivery.WorkerRole,
             AssignmentPurpose: delivery.AssignmentPurpose,
-            Waterfall: BuildWaterfall(delivery));
+            Waterfall: BuildWaterfall(delivery, now),
+            TargetWork: targetWork,
+            RuntimeControl: runtimeControl);
+    }
+
+    /// <summary>
+    /// Build target-work attribution from delivery metadata fields.
+    /// Uses explicit targetProjectId/targetTaskId from Channels targetWork
+    /// when available, falling back to delivery project/task context.
+    /// </summary>
+    private static DeliveryTargetWork? BuildTargetWork(DeliveryRow delivery)
+    {
+        // Extract targetWork fields from metadata JSON if present
+        string? targetProjectId = delivery.TargetWorkProjectId ?? delivery.ProjectId;
+        string? targetTaskId = delivery.TargetWorkTaskId ?? delivery.TaskId?.ToString();
+        string? assignmentId = delivery.AssignmentId;
+        string? runId = delivery.RunId;
+        string? role = delivery.TargetWorkRole ?? delivery.WorkerRole;
+        string? profileIdentity = delivery.TargetWorkProfileIdentity;
+
+        // Only emit targetWork when we have meaningful attribution
+        if (string.IsNullOrWhiteSpace(targetProjectId)
+            && string.IsNullOrWhiteSpace(targetTaskId)
+            && string.IsNullOrWhiteSpace(assignmentId)
+            && string.IsNullOrWhiteSpace(runId)
+            && string.IsNullOrWhiteSpace(role)
+            && string.IsNullOrWhiteSpace(profileIdentity))
+        {
+            return null;
+        }
+
+        return new DeliveryTargetWork(
+            TargetProjectId: targetProjectId,
+            TargetTaskId: targetTaskId,
+            AssignmentId: assignmentId,
+            RunId: runId,
+            Role: role,
+            ProfileIdentity: profileIdentity);
+    }
+
+    /// <summary>
+    /// Build runtime/control identity from delivery pipeline metadata.
+    /// Separate from target work attribution to prevent conflation.
+    /// </summary>
+    private static DeliveryRuntimeControl? BuildRuntimeControl(DeliveryRow delivery)
+    {
+        if (string.IsNullOrWhiteSpace(delivery.ChannelId)
+            && delivery.LastAttempt?.SessionId is null
+            && string.IsNullOrWhiteSpace(delivery.AgentInstanceId)
+            && string.IsNullOrWhiteSpace(delivery.PoolMemberId))
+        {
+            return null;
+        }
+
+        return new DeliveryRuntimeControl(
+            ChannelId: delivery.ChannelId,
+            SessionId: delivery.LastAttempt?.SessionId,
+            AdapterInstanceId: null,
+            AgentInstanceId: delivery.AgentInstanceId,
+            PoolMemberId: delivery.PoolMemberId);
     }
 
     /// <summary>
@@ -232,7 +295,7 @@ public sealed class GatewayStateOverviewService
     /// Phases without provider/Channels telemetry are explicitly labelled
     /// provider_timing_unavailable rather than blended into bridge or runtime spans.
     /// </summary>
-    private static DeliveryWaterfall? BuildWaterfall(DeliveryRow delivery)
+    private static DeliveryWaterfall? BuildWaterfall(DeliveryRow delivery, DateTimeOffset now)
     {
         var status = delivery.Status;
         var createdAt = delivery.CreatedAt;
@@ -260,9 +323,20 @@ public sealed class GatewayStateOverviewService
             var claimedAt = delivery.ClaimedAt;
             if (claimedAt is null)
             {
-                // Never claimed
+                // Never claimed — distinguish "not claimed yet" from "gateway unavailable"
+                // based on delivery age. A fresh delivery is simply waiting; an old one
+                // suggests the Gateway/runtime may be unavailable.
+                var ageMinutes = (now - createdAt).TotalMinutes;
+                var (statusLabel, claimGuidance) = ageMinutes < StuckPendingMinutes
+                    ? ("not_claimed_yet", "Delivery is queued and waiting for a claim. The target worker may not have polled yet.")
+                    : ("gateway_unavailable_or_unclaimed", "Delivery has been waiting longer than expected. Check whether the target worker/binding is active and the Gateway delivery loop is running. Use run-id-scoped readback for authoritative state.");
+
+                var readbackHint = delivery.RunId is not null
+                    ? $"GET /api/worker-pool/assignments/by-run/{delivery.RunId}"
+                    : null;
+
                 return new DeliveryWaterfall(
-                    StatusLabel: "gateway_unclaimed",
+                    StatusLabel: statusLabel,
                     CreatedAt: createdAt,
                     ClaimedAt: null,
                     FirstCallbackAt: null,
@@ -272,7 +346,9 @@ public sealed class GatewayStateOverviewService
                     RuntimeSpanMs: null,
                     CallbackPersistedSpanMs: null,
                     ProviderTiming: null,
-                    SuppressionReason: null);
+                    SuppressionReason: null,
+                    ClaimGuidance: claimGuidance,
+                    ReadbackHint: readbackHint);
             }
 
             var gatewaySpanMs = (claimedAt.Value - createdAt).TotalMilliseconds;
@@ -280,7 +356,12 @@ public sealed class GatewayStateOverviewService
 
             if (firstCallbackAt is null)
             {
-                // Claimed but no callback yet
+                // Claimed but no callback yet — distinguish from "not claimed yet"
+                var callbackGuidance = "Delivery was claimed by a bridge/adapter but no runtime callback has been received yet. The worker may be processing or the callback may be delayed.";
+                var callbackReadbackHint = delivery.RunId is not null
+                    ? $"GET /api/worker-pool/assignments/by-run/{delivery.RunId}"
+                    : null;
+
                 return new DeliveryWaterfall(
                     StatusLabel: "bridge_claimed_waiting_runtime",
                     CreatedAt: createdAt,
@@ -292,7 +373,9 @@ public sealed class GatewayStateOverviewService
                     RuntimeSpanMs: null,
                     CallbackPersistedSpanMs: null,
                     ProviderTiming: "provider_timing_unavailable",
-                    SuppressionReason: null);
+                    SuppressionReason: null,
+                    ClaimGuidance: callbackGuidance,
+                    ReadbackHint: callbackReadbackHint);
             }
 
             var bridgeSpanMs = (firstCallbackAt.Value - claimedAt.Value).TotalMilliseconds;
@@ -345,6 +428,9 @@ public sealed class GatewayStateOverviewService
 
             if (claimedAt is null && firstCallbackAt is null)
             {
+                var terminalReadbackHint = delivery.RunId is not null
+                    ? $"GET /api/worker-pool/assignments/by-run/{delivery.RunId}"
+                    : null;
                 return new DeliveryWaterfall(
                     StatusLabel: "terminal_unclaimed",
                     CreatedAt: createdAt,
@@ -356,7 +442,9 @@ public sealed class GatewayStateOverviewService
                     RuntimeSpanMs: null,
                     CallbackPersistedSpanMs: null,
                     ProviderTiming: null,
-                    SuppressionReason: null);
+                    SuppressionReason: null,
+                    ClaimGuidance: "Delivery reached a terminal state without being claimed. This may indicate the delivery expired before a worker polled, or the Gateway was unavailable for the entire delivery window.",
+                    ReadbackHint: terminalReadbackHint);
             }
 
             if (claimedAt is not null && firstCallbackAt is null)
@@ -563,6 +651,11 @@ public sealed class GatewayStateOverviewService
                        json_extract(dr.metadata_json, '$.run_id'),
                        json_extract(dr.metadata_json, '$.workerRunId'),
                        json_extract(dr.metadata_json, '$.worker_run_id')) as run_id,
+                   -- Target-work attribution from Channels targetWork fields
+                   json_extract(dr.metadata_json, '$.target_work.targetProjectId') as target_work_project_id,
+                   json_extract(dr.metadata_json, '$.target_work.targetTaskId') as target_work_task_id,
+                   json_extract(dr.metadata_json, '$.target_work.role') as target_work_role,
+                   json_extract(dr.metadata_json, '$.target_work.profileIdentity') as target_work_profile_identity,
                    da.id, da.attempt_number, da.adapter_binding_id, da.status, da.ack_kind,
                    da.external_message_id, da.session_id, da.observed_at, da.error_code, da.error_message
             FROM delivery_requests dr
@@ -633,17 +726,21 @@ public sealed class GatewayStateOverviewService
                 AgentInstanceId: reader.IsDBNull(26) ? null : reader.GetString(26),
                 PoolMemberId: reader.IsDBNull(27) ? null : reader.GetString(27),
                 RunId: reader.IsDBNull(28) ? null : reader.GetString(28),
-                LastAttempt: reader.IsDBNull(29) ? null : new GatewayDeliveryAttemptOverview(
-                    AttemptId: reader.GetInt64(29),
-                    AttemptNumber: reader.GetInt32(30),
-                    AdapterBindingId: reader.IsDBNull(31) ? null : reader.GetInt64(31),
-                    Status: reader.GetString(32),
-                    AckKind: reader.IsDBNull(33) ? null : reader.GetString(33),
-                    ExternalMessageId: reader.IsDBNull(34) ? null : reader.GetString(34),
-                    SessionId: reader.IsDBNull(35) ? null : reader.GetString(35),
-                    ObservedAt: ReadDateTimeOffset(reader, 36),
-                    ErrorCode: reader.IsDBNull(37) ? null : reader.GetString(37),
-                    ErrorMessage: reader.IsDBNull(38) ? null : Truncate(reader.GetString(38), 240))));
+                TargetWorkProjectId: reader.IsDBNull(29) ? null : reader.GetString(29),
+                TargetWorkTaskId: reader.IsDBNull(30) ? null : reader.GetString(30),
+                TargetWorkRole: reader.IsDBNull(31) ? null : reader.GetString(31),
+                TargetWorkProfileIdentity: reader.IsDBNull(32) ? null : reader.GetString(32),
+                LastAttempt: reader.IsDBNull(33) ? null : new GatewayDeliveryAttemptOverview(
+                    AttemptId: reader.GetInt64(33),
+                    AttemptNumber: reader.GetInt32(34),
+                    AdapterBindingId: reader.IsDBNull(35) ? null : reader.GetInt64(35),
+                    Status: reader.GetString(36),
+                    AckKind: reader.IsDBNull(37) ? null : reader.GetString(37),
+                    ExternalMessageId: reader.IsDBNull(38) ? null : reader.GetString(38),
+                    SessionId: reader.IsDBNull(39) ? null : reader.GetString(39),
+                    ObservedAt: ReadDateTimeOffset(reader, 40),
+                    ErrorCode: reader.IsDBNull(41) ? null : reader.GetString(41),
+                    ErrorMessage: reader.IsDBNull(42) ? null : Truncate(reader.GetString(42), 240))));
         }
 
         return rows;
@@ -715,6 +812,15 @@ public sealed class GatewayStateOverviewService
                 ? $"{activeDelivery.WorkerIdentity}:{activeDelivery.RunId}"
                 : null;
 
+            // Build target-work projection for the child run
+            var childTargetWork = BuildChildRunTargetWork(activeDelivery, binding);
+
+            // Build runtime/control identity for the child run
+            var childRuntimeControl = new ChildRunRuntimeControl(
+                AdapterInstanceId: adapterId,
+                AdapterKind: binding.AdapterKind,
+                BindingStatus: binding.Status);
+
             results.Add(new ChildRunState(
                 AdapterInstanceId: adapterId,
                 AgentIdentity: binding.AgentIdentity,
@@ -725,10 +831,49 @@ public sealed class GatewayStateOverviewService
                 LeaseId: leaseId,
                 LastSeenAt: binding.LastSeenAt,
                 StaleAfterSeconds: null,
-                Flags: flags));
+                Flags: flags,
+                TargetWork: childTargetWork,
+                RuntimeControl: childRuntimeControl));
         }
 
         return results;
+    }
+
+    /// <summary>
+    /// Build target-work attribution for a child-run binding from its active delivery
+    /// and binding metadata. Uses explicit targetWork fields from delivery when available,
+    /// falls back to binding/delivery context.
+    /// </summary>
+    private static ChildRunTargetWork? BuildChildRunTargetWork(DeliveryRow? activeDelivery, BindingRow binding)
+    {
+        if (activeDelivery is null)
+        {
+            // No active delivery — use binding context only
+            if (string.IsNullOrWhiteSpace(binding.ProjectId) && string.IsNullOrWhiteSpace(binding.Role))
+                return null;
+
+            return new ChildRunTargetWork(
+                TargetProjectId: binding.ProjectId,
+                TargetTaskId: null,
+                AssignmentId: null,
+                RunId: null,
+                Role: binding.Role,
+                ProfileIdentity: ChildRunBindingIdentity.TryParseProfileIdentity(binding.AdapterInstanceId));
+        }
+
+        string? targetProjectId = activeDelivery.TargetWorkProjectId ?? activeDelivery.ProjectId;
+        string? targetTaskId = activeDelivery.TargetWorkTaskId ?? activeDelivery.TaskId?.ToString();
+        string? role = activeDelivery.TargetWorkRole ?? activeDelivery.WorkerRole;
+        string? profileIdentity = activeDelivery.TargetWorkProfileIdentity
+            ?? ChildRunBindingIdentity.TryParseProfileIdentity(binding.AdapterInstanceId);
+
+        return new ChildRunTargetWork(
+            TargetProjectId: targetProjectId,
+            TargetTaskId: targetTaskId,
+            AssignmentId: activeDelivery.AssignmentId,
+            RunId: activeDelivery.RunId,
+            Role: role,
+            ProfileIdentity: profileIdentity);
     }
 
     private static bool DeliveryMatchesChildBinding(DeliveryRow delivery, BindingRow binding, string adapterInstanceId, string? bindingRunId)
@@ -779,5 +924,9 @@ public sealed class GatewayStateOverviewService
         string? AgentInstanceId,
         string? PoolMemberId,
         string? RunId,
+        string? TargetWorkProjectId,
+        string? TargetWorkTaskId,
+        string? TargetWorkRole,
+        string? TargetWorkProfileIdentity,
         GatewayDeliveryAttemptOverview? LastAttempt);
 }

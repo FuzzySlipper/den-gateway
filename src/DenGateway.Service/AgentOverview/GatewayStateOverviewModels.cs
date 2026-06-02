@@ -104,7 +104,29 @@ public sealed record ChildRunState(
     [property: JsonPropertyName("leaseId")] string? LeaseId,
     [property: JsonPropertyName("lastSeenAt")] DateTimeOffset? LastSeenAt,
     [property: JsonPropertyName("staleAfterSeconds")] int? StaleAfterSeconds,
-    [property: JsonPropertyName("flags")] IReadOnlyList<string> Flags);
+    [property: JsonPropertyName("flags")] IReadOnlyList<string> Flags,
+    [property: JsonPropertyName("targetWork")] ChildRunTargetWork? TargetWork = null,
+    [property: JsonPropertyName("runtimeControl")] ChildRunRuntimeControl? RuntimeControl = null);
+
+/// <summary>
+/// Target-work attribution for a child-run binding, carrying project/task/assignment
+/// context from Core/Channels rather than inferring from transport session.
+/// </summary>
+public sealed record ChildRunTargetWork(
+    [property: JsonPropertyName("targetProjectId")] string? TargetProjectId,
+    [property: JsonPropertyName("targetTaskId")] string? TargetTaskId,
+    [property: JsonPropertyName("assignmentId")] string? AssignmentId,
+    [property: JsonPropertyName("runId")] string? RunId,
+    [property: JsonPropertyName("role")] string? Role,
+    [property: JsonPropertyName("profileIdentity")] string? ProfileIdentity);
+
+/// <summary>
+/// Runtime/control identity for a child-run binding, separate from target work.
+/// </summary>
+public sealed record ChildRunRuntimeControl(
+    [property: JsonPropertyName("adapterInstanceId")] string? AdapterInstanceId,
+    [property: JsonPropertyName("adapterKind")] string? AdapterKind,
+    [property: JsonPropertyName("bindingStatus")] string? BindingStatus);
 
 public sealed record DeliverySummaryCounts(
     [property: JsonPropertyName("state")] string State,
@@ -144,7 +166,9 @@ public sealed record GatewayDeliveryOverview(
     [property: JsonPropertyName("workerIdentity")] string? WorkerIdentity = null,
     [property: JsonPropertyName("workerRole")] string? WorkerRole = null,
     [property: JsonPropertyName("assignmentPurpose")] string? AssignmentPurpose = null,
-    [property: JsonPropertyName("waterfall")] DeliveryWaterfall? Waterfall = null);
+    [property: JsonPropertyName("waterfall")] DeliveryWaterfall? Waterfall = null,
+    [property: JsonPropertyName("targetWork")] DeliveryTargetWork? TargetWork = null,
+    [property: JsonPropertyName("runtimeControl")] DeliveryRuntimeControl? RuntimeControl = null);
 
 public sealed record GatewayDeliveryAttemptOverview(
     [property: JsonPropertyName("attemptId")] long AttemptId,
@@ -174,4 +198,32 @@ public sealed record DeliveryWaterfall(
     [property: JsonPropertyName("runtimeSpanMs")] double? RuntimeSpanMs,
     [property: JsonPropertyName("callbackPersistedSpanMs")] double? CallbackPersistedSpanMs,
     [property: JsonPropertyName("providerTiming")] string? ProviderTiming,
-    [property: JsonPropertyName("suppressionReason")] string? SuppressionReason);
+    [property: JsonPropertyName("suppressionReason")] string? SuppressionReason,
+    [property: JsonPropertyName("claimGuidance")] string? ClaimGuidance = null,
+    [property: JsonPropertyName("readbackHint")] string? ReadbackHint = null);
+
+/// <summary>
+/// Target-work attribution metadata carried alongside Gateway delivery evidence.
+/// Populated from Core assignment/run projections and Channels targetWork fields.
+/// Gateway preserves this metadata when available but does not become the
+/// source of truth for work ownership.
+/// </summary>
+public sealed record DeliveryTargetWork(
+    [property: JsonPropertyName("targetProjectId")] string? TargetProjectId,
+    [property: JsonPropertyName("targetTaskId")] string? TargetTaskId,
+    [property: JsonPropertyName("assignmentId")] string? AssignmentId,
+    [property: JsonPropertyName("runId")] string? RunId,
+    [property: JsonPropertyName("role")] string? Role,
+    [property: JsonPropertyName("profileIdentity")] string? ProfileIdentity);
+
+/// <summary>
+/// Runtime/control identity metadata for the Gateway delivery pipeline.
+/// Separated from target-work attribution to avoid conflating transport
+/// session state with target project/task ownership.
+/// </summary>
+public sealed record DeliveryRuntimeControl(
+    [property: JsonPropertyName("channelId")] string? ChannelId,
+    [property: JsonPropertyName("sessionId")] string? SessionId,
+    [property: JsonPropertyName("adapterInstanceId")] string? AdapterInstanceId,
+    [property: JsonPropertyName("agentInstanceId")] string? AgentInstanceId,
+    [property: JsonPropertyName("poolMemberId")] string? PoolMemberId);

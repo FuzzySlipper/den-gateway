@@ -598,7 +598,7 @@ public class GatewayStateOverviewTests
     }
 
     [Fact]
-    public async Task PendingDelivery_HasGatewayUnclaimedWaterfall()
+    public async Task PendingDelivery_HasNotClaimedYetWaterfall()
     {
         var (databasePath, database) = CreateInitializedDatabase();
         try
@@ -615,12 +615,15 @@ public class GatewayStateOverviewTests
             var group = Assert.Single(result.Groups);
             var delivery = Assert.Single(group.CurrentDeliveries);
             Assert.NotNull(delivery.Waterfall);
-            Assert.Equal("gateway_unclaimed", delivery.Waterfall.StatusLabel);
+            // Fresh pending delivery (< StuckPendingMinutes old) uses "not_claimed_yet"
+            Assert.Equal("not_claimed_yet", delivery.Waterfall.StatusLabel);
             Assert.Null(delivery.Waterfall.ClaimedAt);
             Assert.Null(delivery.Waterfall.FirstCallbackAt);
             Assert.Null(delivery.Waterfall.CompletedAt);
             Assert.Null(delivery.Waterfall.ProviderTiming);
             Assert.Null(delivery.Waterfall.SuppressionReason);
+            Assert.NotNull(delivery.Waterfall.ClaimGuidance);
+            Assert.Contains("waiting for a claim", delivery.Waterfall.ClaimGuidance);
         }
         finally
         {
@@ -1182,6 +1185,324 @@ public class GatewayStateOverviewTests
             var group = result.Groups[0];
             // The delivery should be flagged as stuck (stale assignment)
             Assert.Contains(group.CurrentDeliveries, d => d.Flags.Contains("stuck"));
+        }
+        finally { CleanupDatabase(dbPath); }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // #1846: Gateway delivery/claim evidence separated from target work attribution
+    // ─────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task QuietWorker_EventuallyCompletes_NotMisclassifiedAsUnavailable()
+    {
+        // A delivery that was claimed, got a first reply, then completed
+        // should NOT surface any "unavailable" or "no-claim" signals.
+        var (dbPath, db) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(dbPath, "hermes_profile", "r1", "my-agent", null, "den-proj", "runner",
+                "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+
+            var createdAt = TestNow.AddMinutes(-20);
+            var claimedAt = TestNow.AddMinutes(-18);
+            var observedAt = TestNow.AddMinutes(-15);
+            var completedAt = TestNow.AddMinutes(-10);
+
+            await using var connection = new SqliteConnection($"Data Source={dbPath}");
+            await connection.OpenAsync();
+
+            // Seed completed delivery — simulates quiet-but-eventually-completing worker
+            await using var cmd = connection.CreateCommand();
+            cmd.CommandText = """
+                INSERT INTO delivery_requests (
+                    source_kind, target_type, target_identity, project_id, delivery_mode, priority,
+                    status, dedupe_key, attempt_count, cascade_depth,
+                    claimed_at, completed_at, created_at, updated_at,
+                    metadata_json
+                ) VALUES (
+                    'test', 'agent', $target, $project, 'wake', 2,
+                    'completed', $dedupe, 1, 0,
+                    $claimed, $completed, $created, $updated,
+                    $metadata
+                )
+                """;
+            cmd.Parameters.AddWithValue("$target", "my-agent");
+            cmd.Parameters.AddWithValue("$project", "den-proj");
+            cmd.Parameters.AddWithValue("$dedupe", "dedupe:quiet-complete:1");
+            cmd.Parameters.AddWithValue("$claimed", claimedAt.ToString("O"));
+            cmd.Parameters.AddWithValue("$completed", completedAt.ToString("O"));
+            cmd.Parameters.AddWithValue("$created", createdAt.ToString("O"));
+            cmd.Parameters.AddWithValue("$updated", completedAt.ToString("O"));
+            cmd.Parameters.AddWithValue("$metadata", $"{{\"summary_metadata\":{{\"runId\":\"quiet-run-123\"}}}}");
+            await cmd.ExecuteNonQueryAsync();
+
+            // Add delivery attempt with observed_at
+            await using var attemptCmd = connection.CreateCommand();
+            attemptCmd.CommandText = """
+                INSERT INTO delivery_attempts (
+                    delivery_request_id, adapter_binding_id, attempt_number, status,
+                    ack_kind, external_message_id, session_id, observed_at, payload_json, created_at
+                ) VALUES (
+                    (SELECT id FROM delivery_requests WHERE dedupe_key = $dedupe),
+                    (SELECT id FROM gateway_adapter_bindings WHERE agent_identity = 'my-agent' LIMIT 1),
+                    1, 'completed',
+                    'completed', 'ext-quiet', 'session-quiet', $observed, '{}', $created
+                )
+                """;
+            attemptCmd.Parameters.AddWithValue("$dedupe", "dedupe:quiet-complete:1");
+            attemptCmd.Parameters.AddWithValue("$observed", observedAt.ToString("O"));
+            attemptCmd.Parameters.AddWithValue("$created", claimedAt.ToString("O"));
+            await attemptCmd.ExecuteNonQueryAsync();
+
+            var service = new GatewayStateOverviewService(db);
+            var result = await service.GetGatewayStateOverviewAsync(
+                new GatewayStateOverviewRequest(AgentIdentity: "my-agent", IncludeTerminalMinutes: 120), TestNow);
+
+            var group = Assert.Single(result.Groups);
+            var delivery = Assert.Single(group.RecentDeliveries);
+            Assert.Equal("completed", delivery.Status);
+            Assert.NotNull(delivery.Waterfall);
+            Assert.Equal("callback_persisted", delivery.Waterfall.StatusLabel);
+            // No unavailable/no-claim signals
+            Assert.DoesNotContain("unavailable", delivery.Waterfall.StatusLabel);
+            Assert.DoesNotContain("unclaimed", delivery.Waterfall.StatusLabel);
+            Assert.NotNull(delivery.Waterfall.ClaimedAt);
+            Assert.NotNull(delivery.Waterfall.FirstCallbackAt);
+            Assert.NotNull(delivery.Waterfall.CompletedAt);
+            // Has readback hint because runId is present in metadata
+            Assert.Null(delivery.Waterfall.ReadbackHint); // no explicit readback hint for completed
+        }
+        finally { CleanupDatabase(dbPath); }
+    }
+
+    [Fact]
+    public async Task TrueNoClaimWorker_SurfacesGatewayUnavailableDistinctly()
+    {
+        // A delivery stuck in pending for longer than StuckPendingMinutes
+        // should surface "gateway_unavailable_or_unclaimed" distinctly from
+        // a fresh "not_claimed_yet" delivery.
+        var (dbPath, db) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(dbPath, "hermes_profile", "r1", "my-agent", null, "den-proj", "runner",
+                "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+
+            // Old pending delivery (older than StuckPendingMinutes = 15 min)
+            await SeedDeliveryAsync(dbPath, "my-agent", "den-proj", "pending",
+                dedupeKey: "dedupe:stuck-unclaimed:1", createdAt: TestNow.AddMinutes(-30));
+
+            // Fresh pending delivery (recent)
+            await SeedDeliveryAsync(dbPath, "my-agent", "den-proj", "pending",
+                dedupeKey: "dedupe:fresh-unclaimed:1", createdAt: TestNow.AddMinutes(-5));
+
+            var service = new GatewayStateOverviewService(db);
+            var result = await service.GetGatewayStateOverviewAsync(
+                new GatewayStateOverviewRequest(AgentIdentity: "my-agent"), TestNow);
+
+            var group = Assert.Single(result.Groups);
+            Assert.Equal(2, group.CurrentDeliveries.Count);
+
+            // The older delivery should be stuck with unavailable signal
+            var stuckDelivery = group.CurrentDeliveries.First(d => d.Flags.Contains("stuck"));
+            Assert.NotNull(stuckDelivery.Waterfall);
+            Assert.Equal("gateway_unavailable_or_unclaimed", stuckDelivery.Waterfall.StatusLabel);
+            Assert.Contains("longer than expected", stuckDelivery.Waterfall.ClaimGuidance);
+
+            // The fresh delivery should be not_claimed_yet (not unavailable)
+            var freshDelivery = group.CurrentDeliveries.First(d => !d.Flags.Contains("stuck"));
+            Assert.NotNull(freshDelivery.Waterfall);
+            Assert.Equal("not_claimed_yet", freshDelivery.Waterfall.StatusLabel);
+            Assert.Contains("waiting for a claim", freshDelivery.Waterfall.ClaimGuidance);
+        }
+        finally { CleanupDatabase(dbPath); }
+    }
+
+    [Fact]
+    public async Task TargetWorkProjection_SeparatesTargetWorkFromRuntimeControl()
+    {
+        // Verify that target-work attribution fields are in TargetWork
+        // and runtime/control fields are in RuntimeControl, not conflated.
+        var (dbPath, db) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(dbPath, "hermes_profile", "r1", "my-agent", null, "den-proj", "runner",
+                "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+
+            // Seed delivery with target_work metadata and runtime fields
+            await using var connection = new SqliteConnection($"Data Source={dbPath}");
+            await connection.OpenAsync();
+            await using var insert = connection.CreateCommand();
+            insert.CommandText = """
+                INSERT INTO delivery_requests (
+                    source_kind, source_id, target_type, target_identity, project_id, task_id,
+                    delivery_mode, priority, status, dedupe_key, attempt_count, cascade_depth,
+                    assignment_id, worker_identity, worker_role, assignment_purpose,
+                    channel_id, agent_instance_id, pool_member_id, metadata_json,
+                    created_at, updated_at
+                ) VALUES (
+                    'worker_assignment', '9001', 'agent', $target, $project, 1846,
+                    'wake', 2, 'pending', $dedupe, 0, 0,
+                    $assignment_id, $worker_identity, $worker_role, 'implement_task_1846',
+                    $channel_id, $agent_instance_id, $pool_member_id, $metadata,
+                    $created, $updated
+                )
+                """;
+            insert.Parameters.AddWithValue("$target", "my-agent");
+            insert.Parameters.AddWithValue("$project", "den-proj");
+            insert.Parameters.AddWithValue("$dedupe", "dedupe:target-work:1");
+            insert.Parameters.AddWithValue("$assignment_id", "asn-1846");
+            insert.Parameters.AddWithValue("$worker_identity", "spawned-coder");
+            insert.Parameters.AddWithValue("$worker_role", "coder");
+            insert.Parameters.AddWithValue("$channel_id", "channel-42");
+            insert.Parameters.AddWithValue("$agent_instance_id", "hermes:den-k8:spawned-coder:piw_abc");
+            insert.Parameters.AddWithValue("$pool_member_id", "pm-1");
+            insert.Parameters.AddWithValue("$metadata",
+                @"{""target_work"":{""targetProjectId"":""den-gateway"",""targetTaskId"":""1846"",""role"":""coder"",""profileIdentity"":""spawned-coder""},""summary_metadata"":{""runId"":""dc-1846-run-1""}}");
+            insert.Parameters.AddWithValue("$created", TestNow.AddMinutes(-5).ToString("O"));
+            insert.Parameters.AddWithValue("$updated", TestNow.AddMinutes(-5).ToString("O"));
+            await insert.ExecuteNonQueryAsync();
+
+            var service = new GatewayStateOverviewService(db);
+            var result = await service.GetGatewayStateOverviewAsync(
+                new GatewayStateOverviewRequest(AgentIdentity: "my-agent"), TestNow);
+
+            var group = Assert.Single(result.Groups);
+            var delivery = Assert.Single(group.CurrentDeliveries);
+
+            // TargetWork has target-work attribution from Channels
+            Assert.NotNull(delivery.TargetWork);
+            Assert.Equal("den-gateway", delivery.TargetWork.TargetProjectId);
+            Assert.Equal("1846", delivery.TargetWork.TargetTaskId);
+            Assert.Equal("asn-1846", delivery.TargetWork.AssignmentId);
+            Assert.Equal("dc-1846-run-1", delivery.TargetWork.RunId);
+            Assert.Equal("coder", delivery.TargetWork.Role);
+            Assert.Equal("spawned-coder", delivery.TargetWork.ProfileIdentity);
+
+            // RuntimeControl has runtime/transport identity
+            Assert.NotNull(delivery.RuntimeControl);
+            Assert.Equal("channel-42", delivery.RuntimeControl.ChannelId);
+            Assert.Equal("hermes:den-k8:spawned-coder:piw_abc", delivery.RuntimeControl.AgentInstanceId);
+            Assert.Equal("pm-1", delivery.RuntimeControl.PoolMemberId);
+            Assert.Null(delivery.RuntimeControl.SessionId); // no attempt yet
+
+            // Readback hint present for pending delivery with runId
+            Assert.NotNull(delivery.Waterfall);
+            Assert.Contains("dc-1846-run-1", delivery.Waterfall.ReadbackHint);
+        }
+        finally { CleanupDatabase(dbPath); }
+    }
+
+    [Fact]
+    public async Task ChildRunState_SeparatesTargetWorkFromRuntimeControl()
+    {
+        var (dbPath, db) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(dbPath, "hermes_profile", "hermes:den-k8:spawned-coder:piw_child1",
+                "pool-coder-01", null, "den-core", "coder", "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+            await SeedDeliveryAsync(dbPath, "pool-coder-01", "den-core", "delivering",
+                dedupeKey: "d:child-tw:1", createdAt: TestNow.AddMinutes(-5), leaseExpiresAt: TestNow.AddMinutes(25),
+                assignmentId: "asn-1846", workerIdentity: "pool-coder-01", workerRole: "coder",
+                agentInstanceId: "hermes:den-k8:spawned-coder:piw_child1", poolMemberId: "pool-coder-01", runId: "piw_child1");
+
+            var service = new GatewayStateOverviewService(db);
+            var result = await service.GetGatewayStateOverviewAsync(
+                new GatewayStateOverviewRequest(AgentIdentity: "pool-coder-01"), TestNow);
+
+            var group = result.Groups[0];
+            Assert.Equal(1, group.ChildrenCount);
+            var child = Assert.Single(group.ChildRuns);
+
+            // Child has target-work attribution
+            Assert.NotNull(child.TargetWork);
+            Assert.Equal("den-core", child.TargetWork.TargetProjectId);
+            Assert.Equal("asn-1846", child.TargetWork.AssignmentId);
+            Assert.Equal("piw_child1", child.TargetWork.RunId);
+            Assert.Equal("coder", child.TargetWork.Role);
+            Assert.Equal("spawned-coder", child.TargetWork.ProfileIdentity);
+
+            // Child has runtime/control identity separate from target work
+            Assert.NotNull(child.RuntimeControl);
+            Assert.Equal("hermes:den-k8:spawned-coder:piw_child1", child.RuntimeControl.AdapterInstanceId);
+            Assert.Equal("hermes_profile", child.RuntimeControl.AdapterKind);
+            Assert.Equal("active", child.RuntimeControl.BindingStatus);
+        }
+        finally { CleanupDatabase(dbPath); }
+    }
+
+    [Fact]
+    public async Task PendingDelivery_WithRunId_HasReadbackHint()
+    {
+        // Verify that a pending delivery with runId in metadata gets a
+        // run-id-scoped readback hint in the waterfall.
+        var (dbPath, db) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(dbPath, "hermes_profile", "r1", "my-agent", null, "den-proj", "runner",
+                "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+
+            // Seed delivery with runId in metadata
+            await using var connection = new SqliteConnection($"Data Source={dbPath}");
+            await connection.OpenAsync();
+            await using var insert = connection.CreateCommand();
+            insert.CommandText = """
+                INSERT INTO delivery_requests (
+                    source_kind, target_type, target_identity, project_id, delivery_mode, priority,
+                    status, dedupe_key, attempt_count, cascade_depth, metadata_json,
+                    created_at, updated_at
+                ) VALUES (
+                    'test', 'agent', $target, $project, 'wake', 2,
+                    'pending', $dedupe, 0, 0, $metadata,
+                    $created, $created
+                )
+                """;
+            insert.Parameters.AddWithValue("$target", "my-agent");
+            insert.Parameters.AddWithValue("$project", "den-proj");
+            insert.Parameters.AddWithValue("$dedupe", "dedupe:readback:1");
+            insert.Parameters.AddWithValue("$metadata", @"{""summary_metadata"":{""runId"":""dc-1846-run-readback""}}");
+            insert.Parameters.AddWithValue("$created", TestNow.AddMinutes(-5).ToString("O"));
+            await insert.ExecuteNonQueryAsync();
+
+            var service = new GatewayStateOverviewService(db);
+            var result = await service.GetGatewayStateOverviewAsync(
+                new GatewayStateOverviewRequest(AgentIdentity: "my-agent"), TestNow);
+
+            var group = Assert.Single(result.Groups);
+            var delivery = Assert.Single(group.CurrentDeliveries);
+            Assert.NotNull(delivery.Waterfall);
+            Assert.NotNull(delivery.Waterfall.ReadbackHint);
+            Assert.Contains("dc-1846-run-readback", delivery.Waterfall.ReadbackHint);
+            Assert.Contains("/api/worker-pool/assignments/by-run/", delivery.Waterfall.ReadbackHint);
+        }
+        finally { CleanupDatabase(dbPath); }
+    }
+
+    [Fact]
+    public async Task DeliveryWithoutTargetWork_OmitsTargetWorkProjection()
+    {
+        // Delivery with no target-work metadata should have null TargetWork
+        // and null RuntimeControl when no runtime fields are present.
+        var (dbPath, db) = CreateInitializedDatabase();
+        try
+        {
+            await SeedBindingAsync(dbPath, "hermes_profile", "r1", "my-agent", null, "den-proj", "runner",
+                "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+            // Simple delivery with no assignment, no runtime fields
+            await SeedDeliveryAsync(dbPath, "my-agent", "den-proj", "pending",
+                dedupeKey: "dedupe:no-tw:1", createdAt: TestNow.AddMinutes(-5));
+
+            var service = new GatewayStateOverviewService(db);
+            var result = await service.GetGatewayStateOverviewAsync(
+                new GatewayStateOverviewRequest(AgentIdentity: "my-agent"), TestNow);
+
+            var group = Assert.Single(result.Groups);
+            var delivery = Assert.Single(group.CurrentDeliveries);
+            // TargetWork should be present because ProjectId provides fallback attribution
+            Assert.NotNull(delivery.TargetWork);
+            Assert.Equal("den-proj", delivery.TargetWork.TargetProjectId);
+            // RuntimeControl should be null (no channel_id, session, agent_instance, pool_member)
+            Assert.Null(delivery.RuntimeControl);
         }
         finally { CleanupDatabase(dbPath); }
     }

@@ -266,7 +266,11 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
             AssignmentId: targetWork?.AssignmentId,
             RunId: targetWork?.RunId,
             Role: targetWork?.Role,
-            ProfileIdentity: targetWork?.ProfileIdentity);
+            ProfileIdentity: targetWork?.ProfileIdentity,
+            WorkerRunId: targetWork?.WorkerRunId,
+            WorkerRole: targetWork?.WorkerRole,
+            AgentInstanceId: targetWork?.AgentInstanceId,
+            PoolMemberId: targetWork?.PoolMemberId);
     }
 
     private static IReadOnlyDictionary<string, string> ToSettings(GatewayMembershipsDto dto, GatewayMemberDto member)
@@ -311,7 +315,7 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
     private sealed record GatewayMessageDto(long Id, long ChannelId, string MessageKind, string SenderType, string SenderIdentity, string? SourceKind, string? SourceId, string? SourceProjectId, string? DedupeKey, string? DeepLink, string? Summary, string Body, string CreatedAt);
     private sealed record GatewayEventsDto(IReadOnlyList<GatewayEventItemDto> Items, long? NextAfterId, bool HasMore);
     private sealed record GatewayEventItemDto(long Id, long ChannelId, string MessageKind, string SenderType, string SenderIdentity, string? SourceKind, string? SourceId, string? SourceProjectId, string? DedupeKey, string? DeepLink, string? Summary, string Body, string CreatedAt, GatewayEventTargetWorkDto? TargetWork = null);
-    private sealed record GatewayEventTargetWorkDto(string? TargetProjectId, string? TargetTaskId, string? AssignmentId, string? RunId, string? Role, string? ProfileIdentity);
+    private sealed record GatewayEventTargetWorkDto(string? TargetProjectId, string? TargetTaskId, string? AssignmentId, string? RunId, string? Role, string? ProfileIdentity, string? WorkerRunId = null, string? WorkerRole = null, string? AgentInstanceId = null, string? PoolMemberId = null);
     private sealed record PostGatewaySystemMessageRequest(long? ChannelId, string? ProjectId, string SenderIdentity, string MessageKind, string Body, string SourceKind, string SourceId, string? SourceProjectId, string? Summary, string? DeepLink, string MetadataJson, string DedupeKey);
     private sealed record PostChannelActivityEventRequest(string? ProjectId, string AgentIdentity, string? DeliveryRequestId, string? DisplayBlockId, string? HermesSessionKey, string? ParentHermesSessionKey, string? ParentAgentIdentity, string? WorkerRunId, string? WorkerRole, long? TaskId, long? ThreadId, long? AnchorMessageId, string EventType, string Status, long? Sequence, string? Title, string? Summary, string? PreviewJson, string? MetadataJson, string? DedupeKey);
     private sealed record ChannelActivityEventDto(long Id);

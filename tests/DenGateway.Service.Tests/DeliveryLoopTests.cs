@@ -1098,6 +1098,334 @@ public class DeliveryLoopTests
         Assert.Equal("wake", reader.GetString(6));
     }
 
+    [Fact]
+    public async Task DirectAgentChannelEventWithPoolMemberIdCreatesDeliveryWithConcreteSelector()
+    {
+        // When a direct-agent channel event carries poolMemberId and agentInstanceId
+        // in its targetWork fields, the delivery loop should propagate those into
+        // the delivery request's pool_member_id / agent_instance_id columns.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot(
+                    Cursor: "900",
+                    EventType: "message_created",
+                    ChannelId: "21",
+                    SourceKind: "wake_event",
+                    SourceId: "direct-agent-message:21:spawned-coder:1779700000000",
+                    DedupeKey: "channel-message:900",
+                    OccurredAt: DateTimeOffset.Parse("2026-06-02T10:00:00Z"),
+                    TargetProjectId: "den-gateway",
+                    TargetTaskId: "1875",
+                    AssignmentId: "96",
+                    RunId: "dc-1875-202606021233-coder",
+                    Role: "coder",
+                    ProfileIdentity: "spawned-coder",
+                    WorkerRunId: "dc-1875-202606021233-coder",
+                    WorkerRole: "coder",
+                    AgentInstanceId: "hermes:den-k8:spawned-coder:piw_1875",
+                    PoolMemberId: "pool-coder-02")
+            ],
+            Message = new ChannelMessageSnapshot(
+                ChannelMessageId: "900",
+                ChannelId: "21",
+                SenderType: "user",
+                SenderIdentity: "den-mcp-runner",
+                MessageKind: "human_text",
+                Body: "Implement task 1875",
+                SourceKind: "wake_event",
+                SourceId: "direct-agent-message:21:spawned-coder:1779700000000",
+                DedupeKey: "channel-message:900",
+                CreatedAt: DateTimeOffset.Parse("2026-06-02T10:00:00Z")),
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("21", "agent", "spawned-coder", "wake", "active", 0, new Dictionary<string, string> { ["projectId"] = "den-gateway" }),
+                new ChannelMembershipSnapshot("21", "agent", "other-agent", "wake", "active", 0, new Dictionary<string, string> { ["projectId"] = "den-gateway" })
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels, RelaxedPolicy);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(
+            Source: "channels", ProjectId: "den-gateway", Limit: 10,
+            Now: DateTimeOffset.Parse("2026-06-02T10:01:00Z")));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(1, result.SeenCount);
+        Assert.Equal(1, result.CreatedCount);
+        Assert.Equal(1, result.SuppressedCount); // other-agent suppressed by direct-agent targeting
+
+        // Verify concrete selectors made it into the delivery_request row
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT pool_member_id, agent_instance_id, assignment_id, worker_identity, worker_role, task_id, target_identity
+            FROM delivery_requests
+            WHERE status = 'pending'
+            """;
+        await using var reader = await cmd.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("pool-coder-02", reader.GetString(0));
+        Assert.Equal("hermes:den-k8:spawned-coder:piw_1875", reader.GetString(1));
+        Assert.Equal("96", reader.GetString(2));
+        Assert.Equal("spawned-coder", reader.GetString(3));
+        Assert.Equal("coder", reader.GetString(4));
+        Assert.Equal(1875, reader.GetInt32(5));
+        Assert.Equal("spawned-coder", reader.GetString(6));
+    }
+
+    [Fact]
+    public async Task GenericChannelEventWithoutConcreteSelectorsCreatesClaimableDelivery()
+    {
+        // When a channel event has NO poolMemberId/agentInstanceId, the delivery
+        // request should have null concrete selectors and be claimable by any
+        // ordinary profile binding.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot(
+                    Cursor: "910",
+                    EventType: "message_created",
+                    ChannelId: "77",
+                    SourceKind: "channel_message",
+                    SourceId: "910",
+                    DedupeKey: "channel-message:910",
+                    OccurredAt: DateTimeOffset.Parse("2026-06-02T10:00:00Z"))
+            ],
+            Message = new ChannelMessageSnapshot(
+                ChannelMessageId: "910",
+                ChannelId: "77",
+                SenderType: "user",
+                SenderIdentity: "Patch",
+                MessageKind: "human_text",
+                Body: "Hello team",
+                SourceKind: "channel_message",
+                SourceId: "910",
+                DedupeKey: "channel-message:910",
+                CreatedAt: DateTimeOffset.Parse("2026-06-02T10:00:00Z")),
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("77", "agent", "shared-worker", "wake", "active", 0, new Dictionary<string, string> { ["projectId"] = "den-gateway" })
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(
+            Source: "channels", ProjectId: "den-gateway", Limit: 10,
+            Now: DateTimeOffset.Parse("2026-06-02T10:01:00Z")));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(1, result.CreatedCount);
+
+        // Verify concrete selectors are null — generic delivery
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT pool_member_id, agent_instance_id, assignment_id, worker_identity, worker_role
+            FROM delivery_requests
+            WHERE status = 'pending'
+            """;
+        await using var reader = await cmd.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.True(reader.IsDBNull(0)); // pool_member_id is null
+        Assert.True(reader.IsDBNull(1)); // agent_instance_id is null
+        Assert.True(reader.IsDBNull(2)); // assignment_id is null
+        Assert.True(reader.IsDBNull(3)); // worker_identity is null
+        Assert.True(reader.IsDBNull(4)); // worker_role is null
+    }
+
+    [Fact]
+    public async Task PoolMemberConcreteSelectorPreventsGenericClaim()
+    {
+        // End-to-end: a direct-agent channel event with poolMemberId creates a
+        // delivery request that a generic shared-profile claim (without pool_member_id)
+        // cannot claim, while the matching pool member can.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+
+        // Set up two bindings sharing the same profile but different pool members
+        await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:den-k8:spawned-coder:pool-coder-01",
+            AgentIdentity: "spawned-coder",
+            UserIdentity: null,
+            ProjectId: "den-gateway",
+            Role: "coder",
+            Status: "active",
+            CapabilitiesJson: "{\"delivery_modes\":[\"wake\"]}",
+            MetadataJson: "{}",
+            LastSeenAt: DateTimeOffset.Parse("2026-06-02T10:00:00Z"),
+            ExpiresAt: DateTimeOffset.Parse("2026-06-02T11:00:00Z")));
+
+        await database.UpsertAdapterBindingHeartbeatAsync(new AdapterBindingHeartbeat(
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:den-k8:spawned-coder:pool-coder-02",
+            AgentIdentity: "spawned-coder",
+            UserIdentity: null,
+            ProjectId: "den-gateway",
+            Role: "coder",
+            Status: "active",
+            CapabilitiesJson: "{\"delivery_modes\":[\"wake\"]}",
+            MetadataJson: "{}",
+            LastSeenAt: DateTimeOffset.Parse("2026-06-02T10:00:00Z"),
+            ExpiresAt: DateTimeOffset.Parse("2026-06-02T11:00:00Z")));
+
+        // Delivery loop creates a delivery with poolMemberId via channel event
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot(
+                    Cursor: "920",
+                    EventType: "message_created",
+                    ChannelId: "21",
+                    SourceKind: "wake_event",
+                    SourceId: "direct-agent-message:21:spawned-coder:1779700001000",
+                    DedupeKey: "channel-message:920",
+                    OccurredAt: DateTimeOffset.Parse("2026-06-02T10:00:00Z"),
+                    TargetProjectId: "den-gateway",
+                    TargetTaskId: "1875",
+                    AssignmentId: "96",
+                    ProfileIdentity: "spawned-coder",
+                    WorkerRole: "coder",
+                    PoolMemberId: "pool-coder-02")
+            ],
+            Message = new ChannelMessageSnapshot(
+                ChannelMessageId: "920",
+                ChannelId: "21",
+                SenderType: "user",
+                SenderIdentity: "den-mcp-runner",
+                MessageKind: "human_text",
+                Body: "Wake for task 1875",
+                SourceKind: "wake_event",
+                SourceId: "direct-agent-message:21:spawned-coder:1779700001000",
+                DedupeKey: "channel-message:920",
+                CreatedAt: DateTimeOffset.Parse("2026-06-02T10:00:00Z")),
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("21", "agent", "spawned-coder", "wake", "active", 0, new Dictionary<string, string> { ["projectId"] = "den-gateway" })
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels, RelaxedPolicy);
+
+        var loopResult = await service.PollOnceAsync(new GatewayDeliveryPollRequest(
+            Source: "channels", ProjectId: "den-gateway", Limit: 10,
+            Now: DateTimeOffset.Parse("2026-06-02T10:01:00Z")));
+
+        Assert.Equal("completed", loopResult.Status);
+        Assert.Equal(1, loopResult.CreatedCount);
+
+        // Generic claim (no pool_member_id) must NOT claim the delivery
+        var genericClaim = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:den-k8:spawned-coder:pool-coder-01",
+            ProjectId: "den-gateway",
+            AgentIdentity: "spawned-coder",
+            Role: "coder",
+            AcceptedDeliveryModes: ["wake"],
+            Limit: 5,
+            LeaseSeconds: 60,
+            ClaimedAt: DateTimeOffset.Parse("2026-06-02T10:02:00Z")));
+
+        Assert.Empty(genericClaim.Deliveries);
+
+        // Matching pool member claim must succeed
+        var matchingClaim = await database.ClaimDeliveriesAsync(new DeliveryClaimRequest(
+            AdapterKind: "hermes_profile",
+            AdapterInstanceId: "hermes:den-k8:spawned-coder:pool-coder-02",
+            ProjectId: "den-gateway",
+            AgentIdentity: "spawned-coder",
+            Role: "coder",
+            AcceptedDeliveryModes: ["wake"],
+            Limit: 5,
+            LeaseSeconds: 60,
+            ClaimedAt: DateTimeOffset.Parse("2026-06-02T10:02:00Z"),
+            PoolMemberId: "pool-coder-02"));
+
+        var delivery = Assert.Single(matchingClaim.Deliveries);
+        Assert.Equal("pool-coder-02", delivery.PoolMemberId);
+    }
+
+    [Fact]
+    public async Task TargetWorkMetadataIncludesConcreteSelectorFields()
+    {
+        // Verify that BuildTargetWorkMetadata stores agentInstanceId and
+        // poolMemberId in the metadata_json target_work key when present
+        // in the channel event.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot(
+                    Cursor: "930",
+                    EventType: "message_created",
+                    ChannelId: "21",
+                    SourceKind: "wake_event",
+                    SourceId: "direct-agent-message:21:spawned-coder:1779700002000",
+                    DedupeKey: "channel-message:930",
+                    OccurredAt: DateTimeOffset.Parse("2026-06-02T10:00:00Z"),
+                    TargetProjectId: "den-gateway",
+                    TargetTaskId: "1875",
+                    AssignmentId: "96",
+                    RunId: "dc-1875-run",
+                    Role: "coder",
+                    ProfileIdentity: "spawned-coder",
+                    WorkerRunId: "dc-1875-run",
+                    WorkerRole: "coder",
+                    AgentInstanceId: "hermes:den-k8:spawned-coder:piw_1875",
+                    PoolMemberId: "pool-coder-02")
+            ],
+            Message = new ChannelMessageSnapshot(
+                ChannelMessageId: "930",
+                ChannelId: "21",
+                SenderType: "user",
+                SenderIdentity: "den-mcp-runner",
+                MessageKind: "human_text",
+                Body: "Wake coder for 1875",
+                SourceKind: "wake_event",
+                SourceId: "direct-agent-message:21:spawned-coder:1779700002000",
+                DedupeKey: "channel-message:930",
+                CreatedAt: DateTimeOffset.Parse("2026-06-02T10:00:00Z")),
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("21", "agent", "spawned-coder", "wake", "active", 0, new Dictionary<string, string> { ["projectId"] = "den-gateway" })
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels, RelaxedPolicy);
+
+        await service.PollOnceAsync(new GatewayDeliveryPollRequest(
+            Source: "channels", ProjectId: "den-gateway", Limit: 10,
+            Now: DateTimeOffset.Parse("2026-06-02T10:01:00Z")));
+
+        var row = await ReadSingleDeliveryAsync(databasePath);
+        var metadata = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(row.MetadataJson);
+        Assert.True(metadata.TryGetValue("target_work", out var targetWorkElement));
+        var targetWork = JsonSerializer.Deserialize<Dictionary<string, string?>>(targetWorkElement.GetRawText())!;
+        Assert.Equal("pool-coder-02", targetWork["poolMemberId"]);
+        Assert.Equal("hermes:den-k8:spawned-coder:piw_1875", targetWork["agentInstanceId"]);
+        Assert.Equal("dc-1875-run", targetWork["workerRunId"]);
+        Assert.Equal("coder", targetWork["workerRole"]);
+        Assert.Equal("den-gateway", targetWork["targetProjectId"]);
+        Assert.Equal("1875", targetWork["targetTaskId"]);
+        Assert.Equal("96", targetWork["assignmentId"]);
+        Assert.Equal("dc-1875-run", targetWork["runId"]);
+        Assert.Equal("coder", targetWork["role"]);
+        Assert.Equal("spawned-coder", targetWork["profileIdentity"]);
+    }
+
     private static string CreateTempDatabasePath()
     {
         var dir = Path.Combine(Path.GetTempPath(), "den-gateway-tests", Guid.NewGuid().ToString("N"));

@@ -225,6 +225,15 @@ public sealed class GatewayDeliveryLoopService
                 var dedupeKey = $"{channelEvent.DedupeKey}:{targetType}:{membership.MemberIdentity}";
                 var cascadeDepth = CalculateCascadeDepth(message);
 
+                // --- Direct-agent concrete selector extraction ---
+                // For channel-origin/direct-agent wake events with target-work
+                // metadata, propagate concrete selectors (poolMemberId,
+                // agentInstanceId, assignmentId, workerRunId, workerRole,
+                // profileIdentity, targetTaskId) from the event into the
+                // delivery request so Gateway claim filtering enforces
+                // concrete-instance routing when provided.
+                var concreteSelectors = ExtractConcreteSelectors(channelEvent);
+
                 // --- Configurable DeliveryPolicy evaluation ---
                 // Use the already-resolved delivery mode as the "wake policy"
                 // since ResolveMembershipDeliveryMode has already applied
@@ -297,7 +306,12 @@ public sealed class GatewayDeliveryLoopService
                         CascadeDepth: cascadeDepth,
                         NextAttemptAt: null,
                         ExpiresAt: null,
-                        CreatedAt: now
+                        CreatedAt: now,
+                        AssignmentId: concreteSelectors.AssignmentId,
+                        WorkerIdentity: concreteSelectors.ProfileIdentity,
+                        WorkerRole: concreteSelectors.WorkerRole,
+                        AgentInstanceId: concreteSelectors.AgentInstanceId,
+                        PoolMemberId: concreteSelectors.PoolMemberId
                     ), cancellationToken);
 
                     if (suppressedCreate.AlreadyExisted)
@@ -334,7 +348,7 @@ public sealed class GatewayDeliveryLoopService
                     TargetType: targetType,
                     TargetIdentity: membership.MemberIdentity,
                     ProjectId: membership.Settings.TryGetValue("projectId", out var memberProjectId2) && !string.IsNullOrWhiteSpace(memberProjectId2) ? memberProjectId2 : projectId,
-                    TaskId: null,
+                    TaskId: ParseNullableInt(channelEvent.TargetTaskId),
                     ChannelId: channelEvent.ChannelId,
                     DeliveryMode: deliveryDecision.DeliveryMode,
                     Priority: 3,
@@ -348,7 +362,12 @@ public sealed class GatewayDeliveryLoopService
                     CascadeDepth: cascadeDepth,
                     NextAttemptAt: null,
                     ExpiresAt: null,
-                    CreatedAt: now), cancellationToken);
+                    CreatedAt: now,
+                    AssignmentId: concreteSelectors.AssignmentId,
+                    WorkerIdentity: concreteSelectors.ProfileIdentity,
+                    WorkerRole: concreteSelectors.WorkerRole,
+                    AgentInstanceId: concreteSelectors.AgentInstanceId,
+                    PoolMemberId: concreteSelectors.PoolMemberId), cancellationToken);
 
                 if (create.AlreadyExisted)
                 {
@@ -474,8 +493,9 @@ public sealed class GatewayDeliveryLoopService
     /// <summary>
     /// Build target-work metadata from a Channels event snapshot.
     /// Extracts targetProjectId, targetTaskId, assignmentId, runId, role,
-    /// and profileIdentity from the event's targetWork fields when available
-    /// (populated by Channels #1845). These are stored in the delivery's
+    /// profileIdentity, workerRunId, workerRole, agentInstanceId, and
+    /// poolMemberId from the event's targetWork fields when available
+    /// (populated by Channels #1845/#1875). These are stored in the delivery's
     /// metadata_json under the "target_work" key for downstream projections.
     /// </summary>
     private static Dictionary<string, string?>? BuildTargetWorkMetadata(ChannelEventSnapshot channelEvent)
@@ -485,7 +505,11 @@ public sealed class GatewayDeliveryLoopService
             && string.IsNullOrWhiteSpace(channelEvent.AssignmentId)
             && string.IsNullOrWhiteSpace(channelEvent.RunId)
             && string.IsNullOrWhiteSpace(channelEvent.Role)
-            && string.IsNullOrWhiteSpace(channelEvent.ProfileIdentity))
+            && string.IsNullOrWhiteSpace(channelEvent.ProfileIdentity)
+            && string.IsNullOrWhiteSpace(channelEvent.WorkerRunId)
+            && string.IsNullOrWhiteSpace(channelEvent.WorkerRole)
+            && string.IsNullOrWhiteSpace(channelEvent.AgentInstanceId)
+            && string.IsNullOrWhiteSpace(channelEvent.PoolMemberId))
         {
             return null;
         }
@@ -497,9 +521,39 @@ public sealed class GatewayDeliveryLoopService
             ["assignmentId"] = channelEvent.AssignmentId,
             ["runId"] = channelEvent.RunId,
             ["role"] = channelEvent.Role,
-            ["profileIdentity"] = channelEvent.ProfileIdentity
+            ["profileIdentity"] = channelEvent.ProfileIdentity,
+            ["workerRunId"] = channelEvent.WorkerRunId,
+            ["workerRole"] = channelEvent.WorkerRole,
+            ["agentInstanceId"] = channelEvent.AgentInstanceId,
+            ["poolMemberId"] = channelEvent.PoolMemberId
         };
     }
+
+    /// <summary>
+    /// Extract concrete selector fields from a channel event for delivery
+    /// request claim constraints. When a direct-agent wake event carries
+    /// poolMemberId, agentInstanceId, assignmentId, workerRole, or
+    /// profileIdentity, these become delivery request top-level fields that
+    /// ClaimDeliveriesAsync uses to enforce concrete-instance routing.
+    /// Generic deliveries without concrete selectors remain claimable by
+    /// ordinary profile bindings.
+    /// </summary>
+    private static ConcreteSelectors ExtractConcreteSelectors(ChannelEventSnapshot channelEvent)
+    {
+        return new ConcreteSelectors(
+            AssignmentId: channelEvent.AssignmentId,
+            ProfileIdentity: channelEvent.ProfileIdentity,
+            WorkerRole: channelEvent.WorkerRole ?? channelEvent.Role,
+            AgentInstanceId: channelEvent.AgentInstanceId,
+            PoolMemberId: channelEvent.PoolMemberId);
+    }
+
+    private readonly record struct ConcreteSelectors(
+        string? AssignmentId,
+        string? ProfileIdentity,
+        string? WorkerRole,
+        string? AgentInstanceId,
+        string? PoolMemberId);
 
     private static int CalculateCascadeDepth(ChannelMessageSnapshot? message)
     {

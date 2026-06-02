@@ -294,7 +294,11 @@ public sealed record ChannelEventSnapshot(
     string? AssignmentId = null,
     string? RunId = null,
     string? Role = null,
-    string? ProfileIdentity = null);
+    string? ProfileIdentity = null,
+    string? WorkerRunId = null,
+    string? WorkerRole = null,
+    string? AgentInstanceId = null,
+    string? PoolMemberId = null);
 
 public sealed record UserNotificationFeedItem(
     string Id,

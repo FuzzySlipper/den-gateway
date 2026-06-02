@@ -246,6 +246,61 @@ public class HttpDenChannelsClientTests
     }
 
     [Fact]
+    public async Task ReadChannelEventsAsyncPreservesTopLevelTargetWorkFields()
+    {
+        var client = NewClient((request, _) =>
+        {
+            Assert.Equal("/api/gateway/events", request.RequestUri!.AbsolutePath);
+            return Json(new
+            {
+                items = new[]
+                {
+                    new
+                    {
+                        id = 51,
+                        channelId = 5,
+                        messageKind = "human_text",
+                        senderType = "user",
+                        senderIdentity = "den-mcp-runner",
+                        sourceKind = "wake_event",
+                        sourceId = "direct-agent-message:5:spawned-coder:1780407282734",
+                        sourceProjectId = "den-hermes-bridge",
+                        dedupeKey = "event:51",
+                        deepLink = "den://channel/5/message/2023",
+                        summary = "direct wake",
+                        body = "wake",
+                        createdAt = "2026-06-02T13:34:42Z",
+                        targetProjectId = "den-hermes-bridge",
+                        targetTaskId = 1850,
+                        assignmentId = "1850",
+                        workerRunId = "preflight-pool-coder-02-20260602T1335Z",
+                        workerRole = "coder",
+                        profileIdentity = "spawned-coder",
+                        poolMemberId = "pool-coder-02",
+                        agentInstanceId = "hermes:den-k8:spawned-coder:pool-coder-02:live"
+                    }
+                },
+                nextAfterId = 51,
+                hasMore = false
+            });
+        });
+
+        var events = await client.ReadChannelEventsAsync(null, "den-hermes-bridge", null, 10);
+
+        Assert.True(events.IsAvailable);
+        var item = Assert.Single(events.Items);
+        Assert.Equal("51", item.Cursor);
+        Assert.Equal("den-hermes-bridge", item.TargetProjectId);
+        Assert.Equal("1850", item.TargetTaskId);
+        Assert.Equal("1850", item.AssignmentId);
+        Assert.Equal("preflight-pool-coder-02-20260602T1335Z", item.WorkerRunId);
+        Assert.Equal("coder", item.WorkerRole);
+        Assert.Equal("spawned-coder", item.ProfileIdentity);
+        Assert.Equal("pool-coder-02", item.PoolMemberId);
+        Assert.Equal("hermes:den-k8:spawned-coder:pool-coder-02:live", item.AgentInstanceId);
+    }
+
+    [Fact]
     public async Task ReadChannelEventsAsyncPrefersChannelIdForSystemChannels()
     {
         var client = NewClient((request, _) =>

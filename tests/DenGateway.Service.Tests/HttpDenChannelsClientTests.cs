@@ -192,6 +192,60 @@ public class HttpDenChannelsClientTests
     }
 
     [Fact]
+    public async Task ReadChannelEventsAsyncPreservesTargetWorkFields()
+    {
+        var client = NewClient((request, _) =>
+        {
+            Assert.Equal("/api/gateway/events", request.RequestUri!.AbsolutePath);
+            return Json(new
+            {
+                items = new[]
+                {
+                    new
+                    {
+                        id = 50,
+                        channelId = 42,
+                        messageKind = "wake_event",
+                        senderType = "system",
+                        senderIdentity = "den-channels",
+                        sourceKind = "wake_event",
+                        sourceId = "direct-agent-message:spawned-coder:assignment-87:1846",
+                        sourceProjectId = "den-network",
+                        dedupeKey = "event:50",
+                        deepLink = "den://channel/42",
+                        summary = "",
+                        body = "wake",
+                        createdAt = "2026-06-01T12:00:00Z",
+                        targetWork = new
+                        {
+                            targetProjectId = "den-network",
+                            targetTaskId = "1846",
+                            assignmentId = "87",
+                            runId = "dc-1846-20260602095839-fix",
+                            role = "coder",
+                            profileIdentity = "spawned-coder"
+                        }
+                    }
+                },
+                nextAfterId = 50,
+                hasMore = false
+            });
+        });
+
+        var events = await client.ReadChannelEventsAsync(null, "den-network", null, 10);
+
+        Assert.True(events.IsAvailable);
+        var item = Assert.Single(events.Items);
+        Assert.Equal("50", item.Cursor);
+        Assert.Equal("den-network", item.TargetProjectId);
+        Assert.Equal("1846", item.TargetTaskId);
+        Assert.Equal("87", item.AssignmentId);
+        Assert.Equal("dc-1846-20260602095839-fix", item.RunId);
+        Assert.Equal("coder", item.Role);
+        Assert.Equal("spawned-coder", item.ProfileIdentity);
+    }
+
+    [Fact]
     public async Task ReadChannelEventsAsyncPrefersChannelIdForSystemChannels()
     {
         var client = NewClient((request, _) =>

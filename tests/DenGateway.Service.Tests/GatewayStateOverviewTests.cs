@@ -598,15 +598,19 @@ public class GatewayStateOverviewTests
     }
 
     [Fact]
-    public async Task PendingDelivery_HasNotClaimedYetWaterfall()
+    public async Task FreshPendingDelivery_HasNotClaimedYetWaterfall()
     {
         var (databasePath, database) = CreateInitializedDatabase();
         try
         {
             await SeedBindingAsync(databasePath, "hermes_profile", "r1", "my-agent", null, "den-proj", "runner",
                 "active", TestNow.AddMinutes(-5), TestNow.AddHours(2));
+
+            // Use TestNow, not a near-threshold offset, so the test documents the
+            // semantic boundary: a just-created pending delivery is waiting for a
+            // claim and must not be classified as unavailable/stale.
             await SeedDeliveryAsync(databasePath, "my-agent", "den-proj", "pending",
-                dedupeKey: "dedupe:waterfall:unclaimed", createdAt: TestNow.AddMinutes(-10));
+                dedupeKey: "dedupe:waterfall:unclaimed", createdAt: TestNow);
 
             var service = new GatewayStateOverviewService(database);
             var request = new GatewayStateOverviewRequest(AgentIdentity: "my-agent");
@@ -615,7 +619,6 @@ public class GatewayStateOverviewTests
             var group = Assert.Single(result.Groups);
             var delivery = Assert.Single(group.CurrentDeliveries);
             Assert.NotNull(delivery.Waterfall);
-            // Fresh pending delivery (< StuckPendingMinutes old) uses "not_claimed_yet"
             Assert.Equal("not_claimed_yet", delivery.Waterfall.StatusLabel);
             Assert.Null(delivery.Waterfall.ClaimedAt);
             Assert.Null(delivery.Waterfall.FirstCallbackAt);

@@ -17,6 +17,8 @@ builder.Services.AddOptions<DenGatewayOptions>()
     .Bind(builder.Configuration.GetSection(DenGatewayOptions.SectionName))
     .Validate(options => !string.IsNullOrWhiteSpace(options.Database.Path), "DenGateway:Database:Path is required")
     .Validate(options => !string.IsNullOrWhiteSpace(options.Sentinel.SentinelId), "DenGateway:Sentinel:SentinelId is required")
+    .Validate(options => options.GatewayMode is "compatibility_passthrough" or "broker_authoritative",
+        "DenGateway:GatewayMode must be 'compatibility_passthrough' or 'broker_authoritative'")
     .ValidateOnStart();
 
 var configuredOptions = builder.Configuration.GetSection(DenGatewayOptions.SectionName).Get<DenGatewayOptions>() ?? new DenGatewayOptions();

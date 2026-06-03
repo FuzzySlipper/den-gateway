@@ -146,6 +146,26 @@ If Kestrel chooses a different development URL, use the URL printed by `dotnet r
 - When a new canonical Den state/API capability is needed, create a task in the owning `den-core` Den project instead of routing it through the historical `den-mcp` project.
 - Keep Hermes-specific delivery mechanics in a thin bridge/adapter; Gateway owns routing and delivery state.
 
+## Gateway operating mode
+
+Gateway has an explicit operating mode configured via `DenGateway:GatewayMode`:
+
+- **`compatibility_passthrough`** (default during Direct Delivery migration): Gateway observes and passes through Channels-owned direct-agent events without being the authoritative broker. Direct-agent event creation and delivery truth are owned by Channels (#1901, #1902). Gateway preserves selector fields (`poolMemberId`, `assignmentId`, `workerRunId`, `workerRole`, `agentInstanceId`, source context, and target work metadata) intact without reinterpreting them. The delivery loop continues to route and claim deliveries, but does not create direct-agent events.
+- **`broker_authoritative`**: Reserved for future use after the Direct Delivery migration is complete. Gateway would act as the first-party worker broker.
+
+The mode is reported in:
+- `GET /api/gateway/status` → `gatewayMode` field
+- `GET /health/ready` → `checks.gatewayMode`
+- `GET /api/gateway/direct-agent-messages/status` → compatibility alias documentation
+
+### Direct Delivery migration status
+
+Channels now owns `/api/direct-agent-events` (POST/GET) per #1902. The legacy `/api/gateway/direct-agent-messages` route is a compatibility alias that returns immediately by default and only spin-waits with explicit `waitFor`. Gateway's `GET /api/gateway/direct-agent-messages/status` endpoint documents this migration state.
+
+### Host naming
+
+The generic local runtime host is `den-host`. `den-bridge` refers only to the C#<->TS Electron bridge. Gateway event metadata uses `den-host` as the host identifier in `agentInstanceId` fields (e.g., `hermes:den-host:spawned-coder:piw_1903`).
+
 ## Runbook: diagnosing sluggish direct-agent/channel delivery
 
 ### Waterfall evidence

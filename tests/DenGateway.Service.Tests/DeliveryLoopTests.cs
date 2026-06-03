@@ -1426,6 +1426,251 @@ public class DeliveryLoopTests
         Assert.Equal("spawned-coder", targetWork["profileIdentity"]);
     }
 
+    [Fact]
+    public async Task PassThroughPreservesAllConcreteSelectorFieldsFromDirectAgentEvent()
+    {
+        // Comprehensive pass-through test: verify that ALL Channels-owned
+        // direct-agent selector fields survive the Gateway delivery pipeline
+        // without being dropped or reinterpreted:
+        //   poolMemberId, assignmentId, workerRunId, workerRole,
+        //   agentInstanceId, source context, target work metadata
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot(
+                    Cursor: "950",
+                    EventType: "message_created",
+                    ChannelId: "21",
+                    SourceKind: "wake_event",
+                    SourceId: "direct-agent-message:21:spawned-coder:1779700003000",
+                    DedupeKey: "channel-message:950",
+                    OccurredAt: DateTimeOffset.Parse("2026-06-03T10:00:00Z"),
+                    TargetProjectId: "den-gateway",
+                    TargetTaskId: "1903",
+                    AssignmentId: "145",
+                    RunId: "dc-1903-202606031035-coder",
+                    Role: "coder",
+                    ProfileIdentity: "spawned-coder",
+                    WorkerRunId: "dc-1903-202606031035-coder",
+                    WorkerRole: "coder",
+                    AgentInstanceId: "hermes:den-host:spawned-coder:piw_1903",
+                    PoolMemberId: "pool-coder-01")
+            ],
+            Message = new ChannelMessageSnapshot(
+                ChannelMessageId: "950",
+                ChannelId: "21",
+                SenderType: "user",
+                SenderIdentity: "den-mcp-runner",
+                MessageKind: "human_text",
+                Body: "Implement task 1903 pass-through compatibility",
+                SourceKind: "wake_event",
+                SourceId: "direct-agent-message:21:spawned-coder:1779700003000",
+                DedupeKey: "channel-message:950",
+                CreatedAt: DateTimeOffset.Parse("2026-06-03T10:00:00Z")),
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("21", "agent", "spawned-coder", "wake", "active", 0, new Dictionary<string, string> { ["projectId"] = "den-gateway" })
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels, RelaxedPolicy);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(
+            Source: "channels", ProjectId: "den-gateway", Limit: 10,
+            Now: DateTimeOffset.Parse("2026-06-03T10:01:00Z")));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(1, result.CreatedCount);
+
+        // Verify all concrete selector fields in the delivery_request row
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT pool_member_id, agent_instance_id, assignment_id, worker_identity, worker_role, task_id,
+                   target_identity, project_id, source_kind, source_id
+            FROM delivery_requests
+            WHERE status = 'pending'
+            """;
+        await using var reader = await cmd.ExecuteReaderAsync();
+        Assert.True(await reader.ReadAsync());
+        Assert.Equal("pool-coder-01", reader.GetString(0));    // poolMemberId
+        Assert.Equal("hermes:den-host:spawned-coder:piw_1903", reader.GetString(1)); // agentInstanceId
+        Assert.Equal("145", reader.GetString(2));               // assignmentId
+        Assert.Equal("spawned-coder", reader.GetString(3));     // workerIdentity (from ProfileIdentity)
+        Assert.Equal("coder", reader.GetString(4));              // workerRole
+        Assert.Equal(1903, reader.GetInt32(5));                  // taskId
+        Assert.Equal("spawned-coder", reader.GetString(6));     // targetIdentity
+        Assert.Equal("den-gateway", reader.GetString(7));        // projectId
+        Assert.Equal("wake_event", reader.GetString(8));         // sourceKind preserved
+        Assert.Equal("direct-agent-message:21:spawned-coder:1779700003000", reader.GetString(9)); // sourceId preserved
+
+        // Verify target_work metadata in metadata_json
+        var row = await ReadSingleDeliveryAsync(databasePath);
+        var metadata = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(row.MetadataJson);
+        Assert.True(metadata.TryGetValue("target_work", out var targetWorkElement));
+        var targetWork = JsonSerializer.Deserialize<Dictionary<string, string?>>(targetWorkElement.GetRawText())!;
+        Assert.Equal("pool-coder-01", targetWork["poolMemberId"]);
+        Assert.Equal("hermes:den-host:spawned-coder:piw_1903", targetWork["agentInstanceId"]);
+        Assert.Equal("dc-1903-202606031035-coder", targetWork["workerRunId"]);
+        Assert.Equal("coder", targetWork["workerRole"]);
+        Assert.Equal("den-gateway", targetWork["targetProjectId"]);
+        Assert.Equal("1903", targetWork["targetTaskId"]);
+        Assert.Equal("145", targetWork["assignmentId"]);
+        Assert.Equal("dc-1903-202606031035-coder", targetWork["runId"]);
+        Assert.Equal("coder", targetWork["role"]);
+        Assert.Equal("spawned-coder", targetWork["profileIdentity"]);
+
+        // Verify source context preserved in metadata
+        Assert.Equal("channels", metadata["source"].ToString());
+        Assert.Equal("21", metadata["channel_id"].ToString());
+    }
+
+    [Fact]
+    public async Task RunIdExtractedFromTargetWorkMetadataForClaimRouting()
+    {
+        // Verify that run_id is correctly extracted from the target_work
+        // nested metadata when a channels-sourced delivery uses the new
+        // Direct Delivery targetWork fields (as opposed to the old
+        // summary_metadata.runId path for core-sourced deliveries).
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot(
+                    Cursor: "960",
+                    EventType: "message_created",
+                    ChannelId: "21",
+                    SourceKind: "wake_event",
+                    SourceId: "direct-agent-message:21:spawned-coder:1779700004000",
+                    DedupeKey: "channel-message:960",
+                    OccurredAt: DateTimeOffset.Parse("2026-06-03T10:00:00Z"),
+                    RunId: "dc-1903-run-from-targetwork",
+                    ProfileIdentity: "spawned-coder",
+                    WorkerRole: "coder")
+            ],
+            Message = new ChannelMessageSnapshot(
+                ChannelMessageId: "960",
+                ChannelId: "21",
+                SenderType: "user",
+                SenderIdentity: "den-mcp-runner",
+                MessageKind: "human_text",
+                Body: "Verify run_id extraction from target_work",
+                SourceKind: "wake_event",
+                SourceId: "direct-agent-message:21:spawned-coder:1779700004000",
+                DedupeKey: "channel-message:960",
+                CreatedAt: DateTimeOffset.Parse("2026-06-03T10:00:00Z")),
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("21", "agent", "spawned-coder", "wake", "active", 0, new Dictionary<string, string> { ["projectId"] = "den-gateway" })
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels, RelaxedPolicy);
+
+        await service.PollOnceAsync(new GatewayDeliveryPollRequest(
+            Source: "channels", ProjectId: "den-gateway", Limit: 10,
+            Now: DateTimeOffset.Parse("2026-06-03T10:01:00Z")));
+
+        // Verify run_id is extractable from the delivery_requests query
+        // using the target_work path in the COALESCE chain
+        await using var connection = new SqliteConnection($"Data Source={databasePath}");
+        await connection.OpenAsync();
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT COALESCE(
+                json_extract(metadata_json, '$.summary_metadata.runId'),
+                json_extract(metadata_json, '$.summary_metadata.workerRunId'),
+                json_extract(metadata_json, '$.target_work.runId'),
+                json_extract(metadata_json, '$.target_work.workerRunId'),
+                json_extract(metadata_json, '$.run_id'),
+                json_extract(metadata_json, '$.workerRunId'),
+                json_extract(metadata_json, '$.worker_run_id')) as run_id
+            FROM delivery_requests
+            WHERE status = 'pending'
+            """;
+        var runId = await cmd.ExecuteScalarAsync() as string;
+        Assert.Equal("dc-1903-run-from-targetwork", runId);
+    }
+
+    [Fact]
+    public async Task PassThroughDoesNotDropSourceContextFromChannelsEvent()
+    {
+        // Verify that source context (cursor, event_type, channel_id,
+        // sender_type, sender_identity, wake_policy, cascade_depth,
+        // direct_agent_target) is preserved in the delivery metadata
+        // even when the event comes through the pass-through pipeline.
+        var databasePath = CreateTempDatabasePath();
+        var database = new GatewayDatabase(databasePath);
+        await database.InitializeAsync();
+        var channels = new FakeDenChannelsClient
+        {
+            Events =
+            [
+                new ChannelEventSnapshot(
+                    Cursor: "970",
+                    EventType: "message_created",
+                    ChannelId: "42",
+                    SourceKind: "wake_event",
+                    SourceId: "direct-agent-message:42:reviewer:1779700005000",
+                    DedupeKey: "channel-message:970",
+                    OccurredAt: DateTimeOffset.Parse("2026-06-03T10:00:00Z"),
+                    AssignmentId: "200",
+                    ProfileIdentity: "reviewer",
+                    WorkerRole: "reviewer",
+                    PoolMemberId: "pool-reviewer-01")
+            ],
+            Message = new ChannelMessageSnapshot(
+                ChannelMessageId: "970",
+                ChannelId: "42",
+                SenderType: "user",
+                SenderIdentity: "den-web",
+                MessageKind: "human_text",
+                Body: "Please review",
+                SourceKind: "wake_event",
+                SourceId: "direct-agent-message:42:reviewer:1779700005000",
+                DedupeKey: "channel-message:970",
+                CreatedAt: DateTimeOffset.Parse("2026-06-03T10:00:00Z")),
+            Memberships =
+            [
+                new ChannelMembershipSnapshot("42", "agent", "reviewer", "wake", "active", 0, new Dictionary<string, string> { ["projectId"] = "den-gateway" }),
+                new ChannelMembershipSnapshot("42", "agent", "other-agent", "wake", "active", 0, new Dictionary<string, string> { ["projectId"] = "den-gateway" })
+            ]
+        };
+        var service = new GatewayDeliveryLoopService(database, new FakeDenCoreClient(), channels, RelaxedPolicy);
+
+        var result = await service.PollOnceAsync(new GatewayDeliveryPollRequest(
+            Source: "channels", ProjectId: "den-gateway", Limit: 10,
+            Now: DateTimeOffset.Parse("2026-06-03T10:01:00Z")));
+
+        Assert.Equal("completed", result.Status);
+        Assert.Equal(1, result.CreatedCount);
+        Assert.Equal(1, result.SuppressedCount); // other-agent suppressed
+
+        var row = await ReadSingleDeliveryAsync(databasePath);
+        var metadata = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(row.MetadataJson);
+        // Source context preserved
+        Assert.Equal("channels", metadata["source"].ToString());
+        Assert.Equal("970", metadata["cursor"].ToString());
+        Assert.Equal("message_created", metadata["event_type"].ToString());
+        Assert.Equal("42", metadata["channel_id"].ToString());
+        Assert.Equal("user", metadata["sender_type"].ToString());
+        Assert.Equal("den-web", metadata["sender_identity"].ToString());
+        Assert.Equal("reviewer", metadata["direct_agent_target"].ToString());
+        // Target work metadata preserved
+        Assert.True(metadata.TryGetValue("target_work", out var tw));
+        var twDict = JsonSerializer.Deserialize<Dictionary<string, string?>>(tw.GetRawText())!;
+        Assert.Equal("pool-reviewer-01", twDict["poolMemberId"]);
+        Assert.Equal("200", twDict["assignmentId"]);
+        Assert.Equal("reviewer", twDict["workerRole"]);
+        Assert.Equal("reviewer", twDict["profileIdentity"]);
+    }
+
     private static string CreateTempDatabasePath()
     {
         var dir = Path.Combine(Path.GetTempPath(), "den-gateway-tests", Guid.NewGuid().ToString("N"));

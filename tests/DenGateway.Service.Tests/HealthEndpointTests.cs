@@ -42,6 +42,8 @@ public class HealthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.True(body.Checks.ContainsKey("denCore"));
         Assert.True(body.Checks.ContainsKey("denChannels"));
         Assert.True(body.Checks.ContainsKey("bindings"));
+        Assert.True(body.Checks.ContainsKey("gatewayMode"));
+        Assert.Equal("compatibility_passthrough", body.Checks["gatewayMode"]?.ToString());
     }
 
     [Fact]
@@ -54,6 +56,7 @@ public class HealthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         Assert.NotNull(status);
         Assert.Equal("den-gateway", status.Service);
         Assert.Equal("ready", status.Status);
+        Assert.Equal("compatibility_passthrough", status.GatewayMode);
         Assert.Equal("data/den-gateway.db", status.DatabasePath);
         Assert.Equal("stub", status.DenCoreMode);
         Assert.Equal("stub", status.DenChannelsMode);
@@ -77,10 +80,29 @@ public class HealthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
 
     private sealed record LiveResponse(string Status, string Service);
     private sealed record ReadyResponse(string Status, Dictionary<string, object> Checks);
-    private sealed record GatewayStatus(string Service, string Status, string DatabasePath, string DenCoreMode, string DenChannelsMode, SentinelStatus Sentinel);
+    private sealed record GatewayStatus(string Service, string Status, string GatewayMode, string DatabasePath, string DenCoreMode, string DenChannelsMode, SentinelStatus Sentinel);
     private sealed record SentinelStatus(string SentinelId, string State, int PollIntervalSeconds, int BindingTtlMinutes);
     private sealed record SentinelStatusEndpointResponse(string SentinelId, string State, int PollIntervalSeconds, int DegradedFailureThreshold, int DownFailureThreshold, int StableSuccessThreshold, TestBindingHealth Bindings);
     private sealed record TestBindingHealth(string Status);
+
+    [Fact]
+    public async Task DirectAgentMessagesStatusEndpoint_ReturnsCompatibilityAliasInfo()
+    {
+        using var client = _factory.CreateClient();
+
+        var response = await client.GetAsync("/api/gateway/direct-agent-messages/status");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var body = await response.Content.ReadFromJsonAsync<DirectAgentMessagesStatusResponse>();
+        Assert.NotNull(body);
+        Assert.Equal("compatibility_alias", body.Status);
+        Assert.Equal("/api/direct-agent-events", body.CanonicalRoute);
+        Assert.Equal("den-channels", body.Owner);
+        Assert.Equal("compatibility_passthrough", body.GatewayMode);
+        Assert.Contains("#1901", body.MigrationReferences);
+        Assert.Contains("#1902", body.MigrationReferences);
+        Assert.Contains("#1903", body.MigrationReferences);
+    }
 
     [Fact]
     public async Task FleetOpsOverviewEndpoint_ReturnsExpectedShape()
@@ -157,4 +179,5 @@ public class HealthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         List<FleetOpsArgSchemaShape>? ArgsSchema);
     private sealed record FleetOpsArgSchemaShape(string Name, string Type, bool Required, string Description, string? Pattern);
     private sealed record FleetOpsRunShape(string RunId, string ActionId, string Status, string? ErrorMessage);
+    private sealed record DirectAgentMessagesStatusResponse(string Status, string CanonicalRoute, string Owner, string GatewayMode, string[] MigrationReferences);
 }

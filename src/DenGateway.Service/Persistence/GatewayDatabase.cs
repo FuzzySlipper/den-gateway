@@ -578,6 +578,8 @@ public sealed class GatewayDatabase
                    COALESCE(
                        json_extract(metadata_json, '$.summary_metadata.runId'),
                        json_extract(metadata_json, '$.summary_metadata.workerRunId'),
+                       json_extract(metadata_json, '$.target_work.runId'),
+                       json_extract(metadata_json, '$.target_work.workerRunId'),
                        json_extract(metadata_json, '$.run_id'),
                        json_extract(metadata_json, '$.workerRunId'),
                        json_extract(metadata_json, '$.worker_run_id')) as run_id

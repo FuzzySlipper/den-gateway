@@ -135,6 +135,7 @@ app.MapGet("/health/ready", async (IOptions<DenGatewayOptions> options, IDenCore
     var checks = new Dictionary<string, object?>
     {
         ["configuration"] = "ready",
+        ["gatewayMode"] = value.GatewayMode,
         ["database"] = new
         {
             configured = !string.IsNullOrWhiteSpace(value.Database.Path),
@@ -174,6 +175,7 @@ app.MapGet("/api/gateway/status", async (IOptions<DenGatewayOptions> options, Bi
     return Results.Ok(new GatewayStatusResponse(
         Service: "den-gateway",
         Status: "ready",
+        GatewayMode: value.GatewayMode,
         DatabasePath: value.Database.Path,
         DenCoreMode: value.DenCore.UseStub ? "stub" : "http",
         DenChannelsMode: value.DenChannels.UseStub ? "stub" : "http",
@@ -342,6 +344,28 @@ app.MapGet("/api/gateway/fleet-ops/runs/{runId}", (
     return Results.Ok(new FleetOpsRunResponse(run));
 });
 
+// ---- Direct Delivery compatibility endpoints ----
+
+// Compatibility alias: /api/gateway/direct-agent-messages is the legacy route.
+// Channels now owns /api/direct-agent-events (POST/GET) per #1902.
+// Gateway preserves this alias for observability during migration.
+app.MapGet("/api/gateway/direct-agent-messages/status", (IOptions<DenGatewayOptions> options) =>
+{
+    var mode = options.Value.GatewayMode;
+    return Results.Ok(new
+    {
+        route = "/api/gateway/direct-agent-messages",
+        status = "compatibility_alias",
+        canonicalRoute = "/api/direct-agent-events",
+        owner = "den-channels",
+        gatewayMode = mode,
+        description = mode == "compatibility_passthrough"
+            ? "Gateway operates in pass-through mode. Direct-agent event creation and delivery truth are owned by Channels/Core (#1901, #1902). Gateway preserves selector fields (poolMemberId, assignmentId, workerRunId, workerRole, agentInstanceId, source context, target work metadata) intact without reinterpreting them."
+            : "Gateway operates in broker-authoritative mode.",
+        migrationReferences = new[] { "#1901", "#1902", "#1903" }
+    });
+});
+
 app.Run();
 
 static string EnsureTrailingSlash(string value) => value.EndsWith("/", StringComparison.Ordinal) ? value : value + "/";
@@ -359,6 +383,20 @@ public sealed class DenGatewayOptions
     public SentinelOptions Sentinel { get; init; } = new();
     public DeliveryLoopOptions DeliveryLoop { get; init; } = new();
     public NotificationLaneMirrorOptions NotificationLaneMirror { get; init; } = new();
+
+    /// <summary>
+    /// Gateway operating mode for Direct Delivery migration.
+    /// <list type="bullet">
+    ///   <item><c>compatibility_passthrough</c> — Gateway observes and passes through
+    ///     Channels-owned direct-agent events without being the authoritative broker.
+    ///     Direct-agent event creation is owned by Channels/Core; Gateway preserves
+    ///     selector fields (poolMemberId, assignmentId, workerRunId, workerRole,
+    ///     agentInstanceId, source context, target work metadata) intact.</item>
+    ///   <item><c>broker_authoritative</c> — Gateway acts as the first-party worker
+    ///     broker. Reserved for future use after migration is complete.</item>
+    /// </list>
+    /// </summary>
+    public string GatewayMode { get; init; } = "compatibility_passthrough";
 }
 
 public sealed class DatabaseOptions
@@ -404,7 +442,7 @@ public sealed class DeliveryLoopOptions
 
 public sealed record HealthLiveResponse(string Status, string Service);
 public sealed record HealthReadyResponse(string Status, IReadOnlyDictionary<string, object?> Checks);
-public sealed record GatewayStatusResponse(string Service, string Status, string DatabasePath, string DenCoreMode, string DenChannelsMode, SentinelStatusSummary Sentinel, BindingSnapshotHealth Bindings);
+public sealed record GatewayStatusResponse(string Service, string Status, string GatewayMode, string DatabasePath, string DenCoreMode, string DenChannelsMode, SentinelStatusSummary Sentinel, BindingSnapshotHealth Bindings);
 public sealed record SentinelStatusSummary(string SentinelId, string State, int PollIntervalSeconds, int BindingTtlMinutes);
 public sealed record SentinelStatusResponse(string SentinelId, string State, int PollIntervalSeconds, int DegradedFailureThreshold, int DownFailureThreshold, int StableSuccessThreshold, BindingSnapshotHealth Bindings);
 

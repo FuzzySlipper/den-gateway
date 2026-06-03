@@ -648,6 +648,8 @@ public sealed class GatewayStateOverviewService
                    COALESCE(
                        json_extract(dr.metadata_json, '$.summary_metadata.runId'),
                        json_extract(dr.metadata_json, '$.summary_metadata.workerRunId'),
+                       json_extract(dr.metadata_json, '$.target_work.runId'),
+                       json_extract(dr.metadata_json, '$.target_work.workerRunId'),
                        json_extract(dr.metadata_json, '$.run_id'),
                        json_extract(dr.metadata_json, '$.workerRunId'),
                        json_extract(dr.metadata_json, '$.worker_run_id')) as run_id,

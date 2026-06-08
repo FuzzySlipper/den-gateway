@@ -1,5 +1,7 @@
 # Den Channels `all_messages_except_self` loop guard
 
+> **Historical archive:** `den-gateway` is decommissioned. This document is retained for fact-finding or porting old behavior to active owners (Core, Channels, den-host, Hermes Bridge, FleetOps/den-network). Do not treat it as a current implementation plan or deployment runbook.
+
 Task: #1521
 
 ## Operator note

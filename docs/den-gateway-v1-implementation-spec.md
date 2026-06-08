@@ -1,5 +1,7 @@
 # Den Gateway v1 Implementation Spec
 
+> **Historical archive:** `den-gateway` is decommissioned. This document is retained for fact-finding or porting old behavior to active owners (Core, Channels, den-host, Hermes Bridge, FleetOps/den-network). Do not treat it as a current implementation plan or deployment runbook.
+
 Status: first-pass implementation spec for Den task #1342.
 
 ## Boundary

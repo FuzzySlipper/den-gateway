@@ -1,5 +1,7 @@
 # Discord Bridge Notifications (#1634)
 
+> **Historical archive:** `den-gateway` is decommissioned. This document is retained for fact-finding or porting old behavior to active owners (Core, Channels, den-host, Hermes Bridge, FleetOps/den-network). Do not treat it as a current implementation plan or deployment runbook.
+
 Gateway-owned outbound Discord bridge for Channels-originated notification/wake requests. This is **infrastructure**, not an LLM ambassador workflow — it posts directly to Discord via a dedicated bot token without going through Hermes `send_message`.
 
 ## Boundary

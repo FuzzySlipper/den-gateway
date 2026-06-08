@@ -153,7 +153,7 @@ public class HttpDenChannelsClientTests
     {
         var client = NewClient((request, _) =>
         {
-            Assert.Equal("/api/gateway/events", request.RequestUri!.AbsolutePath);
+            Assert.Equal("/api/direct-agent-events", request.RequestUri!.AbsolutePath);
             Assert.Equal("projectId=den-gateway&afterId=10&limit=2", request.RequestUri.Query.TrimStart('?'));
             return Json(new
             {
@@ -196,7 +196,7 @@ public class HttpDenChannelsClientTests
     {
         var client = NewClient((request, _) =>
         {
-            Assert.Equal("/api/gateway/events", request.RequestUri!.AbsolutePath);
+            Assert.Equal("/api/direct-agent-events", request.RequestUri!.AbsolutePath);
             return Json(new
             {
                 items = new[]
@@ -250,7 +250,7 @@ public class HttpDenChannelsClientTests
     {
         var client = NewClient((request, _) =>
         {
-            Assert.Equal("/api/gateway/events", request.RequestUri!.AbsolutePath);
+            Assert.Equal("/api/direct-agent-events", request.RequestUri!.AbsolutePath);
             return Json(new
             {
                 items = new[]
@@ -305,7 +305,7 @@ public class HttpDenChannelsClientTests
     {
         var client = NewClient((request, _) =>
         {
-            Assert.Equal("/api/gateway/events", request.RequestUri!.AbsolutePath);
+            Assert.Equal("/api/direct-agent-events", request.RequestUri!.AbsolutePath);
             Assert.Equal("channelId=21&afterId=700&limit=5", request.RequestUri.Query.TrimStart('?'));
             return Json(new
             {
@@ -344,7 +344,7 @@ public class HttpDenChannelsClientTests
         var client = NewClient((request, _) =>
         {
             calls++;
-            Assert.Equal("/api/gateway/events", request.RequestUri!.AbsolutePath);
+            Assert.Equal("/api/direct-agent-events", request.RequestUri!.AbsolutePath);
             if (calls == 1)
             {
                 Assert.Equal("projectId=den-network&afterId=0&limit=200", request.RequestUri.Query.TrimStart('?'));

@@ -1,5 +1,7 @@
 # Den Gateway live FleetOps deployment on den-srv
 
+> **Historical archive:** `den-gateway` is decommissioned. This document is retained for fact-finding or porting old behavior to active owners (Core, Channels, den-host, Hermes Bridge, FleetOps/den-network). Do not treat it as a current implementation plan or deployment runbook.
+
 Task #1810 deploys the Gateway FleetOps API behind Den Web without colliding with the existing Den Channels `/api/gateway/*` namespace.
 
 ## Live service layout

@@ -196,13 +196,13 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
         }
 
         query.Add($"limit={limit}");
-        var response = await _httpClient.GetAsync($"/api/gateway/events?{string.Join('&', query)}", cancellationToken);
+        var response = await _httpClient.GetAsync($"/api/direct-agent-events?{string.Join('&', query)}", cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             return ClientListResult<ChannelEventSnapshot>.Unavailable($"http_{(int)response.StatusCode}", "Den Channels event cursor read failed.");
         }
 
-        var dto = await response.Content.ReadFromJsonAsync<GatewayEventsDto>(JsonOptions, cancellationToken);
+        var dto = await response.Content.ReadFromJsonAsync<DirectAgentEventsDto>(JsonOptions, cancellationToken);
         if (dto is null)
         {
             return ClientListResult<ChannelEventSnapshot>.Unavailable("invalid_response", "Den Channels event cursor returned an empty or invalid response.");
@@ -221,13 +221,13 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
         while (true)
         {
             var query = $"projectId={Uri.EscapeDataString(projectId)}&afterId={afterId}&limit={pageSize}";
-            var response = await _httpClient.GetAsync($"/api/gateway/events?{query}", cancellationToken);
+            var response = await _httpClient.GetAsync($"/api/direct-agent-events?{query}", cancellationToken);
             if (!response.IsSuccessStatusCode)
             {
                 return ClientValueResult<string>.Unavailable($"http_{(int)response.StatusCode}", "Den Channels latest event cursor read failed.");
             }
 
-            var dto = await response.Content.ReadFromJsonAsync<GatewayEventsDto>(JsonOptions, cancellationToken);
+            var dto = await response.Content.ReadFromJsonAsync<DirectAgentEventsDto>(JsonOptions, cancellationToken);
             if (dto is null)
             {
                 return ClientValueResult<string>.Unavailable("invalid_response", "Den Channels latest event cursor returned an empty or invalid response.");
@@ -250,7 +250,7 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
         }
     }
 
-    private static ChannelEventSnapshot ToSnapshot(GatewayEventItemDto item)
+    private static ChannelEventSnapshot ToSnapshot(DirectAgentEventItemDto item)
     {
         var targetWork = item.TargetWork;
         return new ChannelEventSnapshot(
@@ -328,8 +328,8 @@ public sealed class HttpDenChannelsClient : IDenChannelsClient
     private sealed record GatewayMembershipsDto(long ChannelId, string ChannelSlug, string ChannelKind, string? ProjectId, IReadOnlyList<GatewayMemberDto> Members);
     private sealed record GatewayMemberDto(long Id, string MemberType, string MemberIdentity, string MembershipStatus, string WakePolicy, bool CanSend, int CooldownSeconds, int MaxAutoRepliesPerWindow, string? SettingsLabel);
     private sealed record GatewayMessageDto(long Id, long ChannelId, string MessageKind, string SenderType, string SenderIdentity, string? SourceKind, string? SourceId, string? SourceProjectId, string? DedupeKey, string? DeepLink, string? Summary, string Body, string CreatedAt);
-    private sealed record GatewayEventsDto(IReadOnlyList<GatewayEventItemDto> Items, long? NextAfterId, bool HasMore);
-    private sealed record GatewayEventItemDto(
+    private sealed record DirectAgentEventsDto(IReadOnlyList<DirectAgentEventItemDto> Items, long? NextAfterId, bool HasMore);
+    private sealed record DirectAgentEventItemDto(
         long Id,
         long ChannelId,
         string MessageKind,

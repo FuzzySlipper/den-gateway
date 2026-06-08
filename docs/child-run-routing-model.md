@@ -1,5 +1,7 @@
 # Child-run routing model for shared-profile worker pools
 
+> **Historical archive:** `den-gateway` is decommissioned. This document is retained for fact-finding or porting old behavior to active owners (Core, Channels, den-host, Hermes Bridge, FleetOps/den-network). Do not treat it as a current implementation plan or deployment runbook.
+
 ## Problem
 
 Shared-profile worker pools (e.g., `spawned-coder` with capacity=4) need each active child

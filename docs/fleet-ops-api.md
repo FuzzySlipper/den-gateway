@@ -1,5 +1,7 @@
 # Fleet Operations API
 
+> **Historical archive:** `den-gateway` is decommissioned. This document is retained for fact-finding or porting old behavior to active owners (Core, Channels, den-host, Hermes Bridge, FleetOps/den-network). Do not treat it as a current implementation plan or deployment runbook.
+
 The Den Gateway FleetOps API provides a typed, auditable interface for restarting Hermes gateway services and running approved fleet maintenance scripts. No arbitrary shell, path, or command arguments are accepted — only allowlisted actions from the registry.
 
 ## Security Model

@@ -1,5 +1,7 @@
 # Den Gateway First-Pass Follow-ups
 
+> **Historical archive:** `den-gateway` is decommissioned. This document is retained for fact-finding or porting old behavior to active owners (Core, Channels, den-host, Hermes Bridge, FleetOps/den-network). Do not treat it as a current implementation plan or deployment runbook.
+
 This document records cross-project contracts discovered while implementing the first standalone `den-gateway` slice. Gateway remains stubbed until these land; no item requires hidden DB coupling.
 
 ## Implemented locally
